@@ -1,7 +1,7 @@
 ﻿import * as db from './db.js';
 import { parseAddress, addressKey, formatAddress, geoQuery, matches } from './address.js';
 import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
-import { geocode } from './geocode.js';
+import { geocode, HUB } from './geocode.js';
 import * as mapView from './map.js';
 
 const APP_VERSION = '1.5.0';
@@ -184,6 +184,31 @@ async function setEntrance(a) {
   mapView.routeTo({ lat: a.lat, lon: a.lon, approx: false }, state.profile);
 }
 
+// ---------- Хаб ----------
+
+// Точка хаба: по умолчанию примерная (Prager Straße), пользователь уточняет её кнопкой 📌 у входа.
+// HUB — общий объект, его же карта использует как старт, если нет GPS.
+Object.assign(HUB, store.get('hub', {}));
+const HUB_ID = 'hub';
+
+async function showHub() {
+  state.routeTo = HUB_ID;
+  store.set('routeTo', HUB_ID);
+  if (state.tab !== 'map') go('map');
+  await mapView.getMapElement();
+  mapView.routeTo({ lat: HUB.lat, lon: HUB.lon, approx: !store.get('hub', null) }, state.profile);
+}
+
+async function setHubPoint() {
+  const p = await mapView.pickPoint();
+  if (!p) return;
+  const hub = { lat: +p.lat.toFixed(6), lon: +p.lon.toFixed(6) };
+  Object.assign(HUB, hub);
+  store.set('hub', hub);
+  toast('Точка хаба сохранена');
+  showHub();
+}
+
 const fmtKm = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
 const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
 
@@ -191,20 +216,24 @@ function renderMap() {
   const wrap = h('div', { class: 'map-screen' });
   const top = h('div', { class: 'map-top' });
   const fabs = h('div', { class: 'map-fabs' });
-  wrap.append(top, fabs);
+  const hubBtn = h('button', { class: 'hub-btn', onclick: showHub }, '🏠 В хаб');
+  wrap.append(top, fabs, hubBtn);
 
   const paint = (nav) => {
-    const a = state.addresses.find((x) => x.id === state.routeTo);
+    const isHub = state.routeTo === HUB_ID;
+    const hubSet = !!store.get('hub', null);
+    const a = isHub ? null : state.addresses.find((x) => x.id === state.routeTo);
+    const reroute = () => (isHub ? showHub() : showRoute(a));
     const banners = [];
     if (nav.picking) {
-      banners.push(h('div', { class: 'map-banner info' }, '👆 Нажми на карте, где вход',
+      banners.push(h('div', { class: 'map-banner info' }, isHub ? '👆 Нажми на карте, где вход в хаб' : '👆 Нажми на карте, где вход',
         h('button', { class: 'btn btn-ghost banner-btn', onclick: () => mapView.cancelPick() }, 'Отмена')));
     }
     if (nav.inPedZone) banners.push(h('div', { class: 'map-banner warn' }, '🚶 Пешеходная зона — веди велосипед рядом'));
     if (nav.gps === 'denied') banners.push(h('div', { class: 'map-banner warn' }, 'GPS запрещён. Разреши геолокацию для этого сайта в настройках Chrome.'));
 
     let card;
-    if (!a) {
+    if (!a && !isHub) {
       card = h('div', { class: 'map-card' },
         h('div', { class: 'muted' }, 'Маршрут не выбран'),
         h('button', { class: 'btn btn-wide', onclick: () => go('addresses') }, 'Выбрать адрес'));
@@ -216,28 +245,33 @@ function renderMap() {
       else if (nav.routeState === 'error') status = 'Маршрут не построился — попробуй ↻';
       card = h('div', { class: 'map-card' },
         h('div', { class: 'map-card-row' },
-          h('button', { class: 'map-dest', onclick: () => openAddress(a.id) },
-            h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
-            h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)),
+          isHub
+            ? h('div', { class: 'map-dest' }, h('span', { 'aria-hidden': 'true' }, '🏠'), h('span', { class: 'addr-main' }, 'Хаб'))
+            : h('button', { class: 'map-dest', onclick: () => openAddress(a.id) },
+              h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
+              h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)),
           h('button', { class: 'btn btn-icon btn-ghost', 'aria-label': 'Убрать маршрут', onclick: () => {
             state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); paint(mapView.nav);
           } }, '✕')),
         status ? h('div', { class: 'map-status' }, status) : null,
-        a.intercom || a.floor || a.entrance ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
-        a.geoApprox ? h('div', { class: 'map-approx' }, `⚠️ Точка примерная (${a.geoNote}). Нажми 📌 и поставь вход.`) : null,
+        a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
+        a?.geoApprox ? h('div', { class: 'map-approx' }, `⚠️ Точка примерная (${a.geoNote}). Нажми 📌 и поставь вход.`) : null,
+        isHub && !hubSet ? h('div', { class: 'map-approx' }, '⚠️ Точка хаба примерная. Когда будешь у входа в хаб — нажми 📌 и поставь её.') : null,
         h('div', { class: 'map-card-row' },
           h('div', { class: 'segmented small-seg' }, mapView.PROFILES.map((p) => h('button', {
             class: 'seg' + (state.profile === p.id ? ' on' : ''),
-            onclick: () => { state.profile = p.id; store.set('profile', p.id); showRoute(a); },
+            onclick: () => { state.profile = p.id; store.set('profile', p.id); reroute(); },
           }, p.label))),
-          h('button', { class: 'btn btn-icon', 'aria-label': 'Перестроить маршрут', onclick: () => showRoute(a) }, '↻')),
+          h('button', { class: 'btn btn-icon', 'aria-label': 'Перестроить маршрут', onclick: reroute }, '↻')),
       );
     }
     top.replaceChildren(card, ...banners);
 
+    hubBtn.hidden = isHub || nav.picking;
     fabs.replaceChildren(...[
-      a ? h('button', { class: 'fab' + (nav.picking ? ' on' : ''), 'aria-label': 'Поставить точку входа', onclick: () => (nav.picking ? mapView.cancelPick() : setEntrance(a)) }, '📌') : null,
-      a && nav.dest ? h('button', { class: 'fab', 'aria-label': 'Показать весь маршрут', onclick: () => mapView.fitRoute() }, '⤢') : null,
+      a || isHub ? h('button', { class: 'fab' + (nav.picking ? ' on' : ''), 'aria-label': isHub ? 'Поставить точку хаба' : 'Поставить точку входа',
+        onclick: () => (nav.picking ? mapView.cancelPick() : isHub ? setHubPoint() : setEntrance(a)) }, '📌') : null,
+      (a || isHub) && nav.dest ? h('button', { class: 'fab', 'aria-label': 'Показать весь маршрут', onclick: () => mapView.fitRoute() }, '⤢') : null,
       h('button', { class: 'fab' + (nav.follow ? ' on' : ''), 'aria-label': 'Моё местоположение', onclick: () => mapView.followMe() }, '◎'),
     ].filter(Boolean));
 
@@ -250,8 +284,12 @@ function renderMap() {
     wrap.prepend(el);
     mapView.resize();
     // Маршрут выбран раньше (например, до перезапуска приложения), но ещё не построен.
-    const a = state.addresses.find((x) => x.id === state.routeTo);
-    if (a && !mapView.nav.dest && mapView.nav.routeState === 'idle') showRoute(a);
+    if (!mapView.nav.dest && mapView.nav.routeState === 'idle') {
+      const a = state.addresses.find((x) => x.id === state.routeTo);
+      if (state.routeTo === HUB_ID) showHub();
+      else if (a) showRoute(a);
+    }
+
   }).catch(() => {
     top.replaceChildren(h('div', { class: 'map-card' }, 'Карта не загрузилась. Проверь интернет и открой вкладку снова.'));
   });
