@@ -337,7 +337,23 @@ main.is-map { position: relative; overflow: hidden; }
   pointer-events: none;
 }
 .map-top > * { pointer-events: auto; }
+.turn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px 10px 10px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .3);
+}
+.turn.now { background: var(--green); color: #05170d; }
+.turn-icon { flex: none; width: 76px; height: 76px; }
+.turn-text { display: flex; flex-direction: column; min-width: 0; }
+.turn-dist { font-size: 34px; font-weight: 800; line-height: 1.1; }
+.turn-label { font-size: 20px; font-weight: 700; }
 .map-card {
+
   display: flex;
   flex-direction: column;
   gap: 6px;

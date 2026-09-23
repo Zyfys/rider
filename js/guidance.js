@@ -52,9 +52,18 @@ export function buildGuide(coords, hints = []) {
   const cum = [0];
   for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + distance(coords[i - 1], coords[i]));
   const items = hints
-    .map(([idx, cmd, exit, , angle]) => ({ at: cum[Math.min(idx, cum.length - 1)], text: phrase(cmd, exit, angle) }))
+    .map(([idx, cmd, exit, , angle]) => ({ at: cum[Math.min(idx, cum.length - 1)], text: phrase(cmd, exit, angle), cmd, exit, angle }))
     .filter((i) => i.text);
   return { coords, cum, total: cum[cum.length - 1], items, next: 0, last: 0, pre: false, arrived: false, offCount: 0 };
+}
+
+// Следующий манёвр для панели со стрелкой: { text, dist, cmd, exit, angle } или { arrive: true, dist }.
+export function upcoming(g, s = 0) {
+  if (g.arrived) return { arrive: true, dist: 0 };
+  const it = g.items.slice(g.next).find((i) => i.at >= s - 15);
+  if (!it) return { arrive: true, dist: Math.max(0, g.total - s) };
+  const { text, cmd, exit, angle } = it;
+  return { text, cmd, exit, angle, dist: Math.max(0, it.at - s) };
 }
 
 // Проекция точки на отрезок в локальных метрах: { s — пройдено вдоль маршрута, off — отклонение }.
@@ -95,12 +104,12 @@ export function locate(g, p) {
 // Один шаг по новой GPS-точке. Возвращает { say: [фразы], offRoute }.
 export function step(g, p) {
   // Уже на месте — дальше молчим и не перестраиваем, даже если отошли от точки.
-  if (g.arrived) return { say: [], offRoute: false };
+  if (g.arrived) return { say: [], offRoute: false, next: upcoming(g) };
   const { s, off } = locate(g, p);
   // Далеко от линии — ничего не объявляем (иначе GPS-скачок дал бы ложное «Вы на месте»).
   // Две такие точки подряд — сход с маршрута.
   g.offCount = off > 45 ? g.offCount + 1 : 0;
-  if (g.offCount) return { say: [], offRoute: g.offCount >= 2 };
+  if (g.offCount) return { say: [], offRoute: g.offCount >= 2, next: null };
 
 
   const say = [];
@@ -125,8 +134,9 @@ export function step(g, p) {
     g.arrived = true;
     say.push('Вы на месте');
   }
-  return { say, offRoute: false };
+  return { say, offRoute: false, next: upcoming(g, s) };
 }
+
 
 export function summary(lengthM, timeS) {
   const min = Math.max(1, Math.round(timeS / 60));

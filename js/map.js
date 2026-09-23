@@ -2,7 +2,7 @@
 // Сознательно без пошаговых команд и автоперестроения: линия маршрута + своя точка.
 import { buildStyle, addOverlayLayers, applyTheme } from './map-style.js';
 import { HUB } from './geocode.js';
-import { buildGuide, step } from './guidance.js';
+import { buildGuide, step, upcoming } from './guidance.js';
 
 export const PROFILES = [
   { id: 'fastbike', label: 'Быстрый' },
@@ -19,6 +19,7 @@ export const nav = {
   route: null,        // { length, time, fromHub }
   routeState: 'idle', // idle | loading | ok | offline | error
   picking: false,
+  next: null,         // следующий манёвр для панели со стрелкой (см. upcoming в guidance.js)
 };
 
 let map = null;
@@ -98,6 +99,7 @@ function startGps() {
     if (nav.inPedZone && !wasInZone) guideListener({ pedZone: true });
     if (guide && !nav.picking) {
       const r = step(guide, [nav.me.lon, nav.me.lat]);
+      nav.next = r.next;
       if (r.say.length) guideListener({ say: r.say });
       if (r.offRoute) guideListener({ offRoute: true });
     }
@@ -138,6 +140,7 @@ export async function routeTo(dest, profile) {
   map.getSource('route').setData(fc([]));
   routeCoords = [];
   guide = null;
+  nav.next = null;
 
   const start = (await waitForFix(6000)) || HUB;
   if (token !== routeToken) return;
@@ -153,6 +156,7 @@ export async function routeTo(dest, profile) {
     routeCoords = gj.features[0].geometry.coordinates.map((c) => [c[0], c[1]]);
     map.getSource('route').setData(gj);
     guide = buildGuide(routeCoords, props.voicehints || []);
+    nav.next = upcoming(guide, 0);
     guideListener({ routeReady: nav.route });
     fitRoute();
   } catch {
@@ -173,7 +177,9 @@ export async function clearRoute() {
   map.getSource('route').setData(fc([]));
   routeCoords = [];
   guide = null;
+  nav.next = null;
   emit();
+
 
 }
 

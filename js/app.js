@@ -4,6 +4,7 @@ import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
 import { geocode, HUB } from './geocode.js';
 import * as mapView from './map.js';
 import { summary } from './guidance.js';
+import { arrowSvg } from './arrows.js';
 
 const APP_VERSION = '1.6.0';
 
@@ -269,7 +270,22 @@ function toggleVoice() {
   toast(state.voice ? '🔊 Голос включён' : '🔇 Голос выключен');
 }
 
-const fmtKm = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
+// Панель манёвра: крупная стрелка + расстояние + что делать. Совпадает с голосовыми подсказками.
+function turnPanel(nav) {
+  const m = nav.next;
+  if (!m || nav.routeState !== 'ok' || nav.picking) return null;
+  const icon = h('div', { class: 'turn-icon' });
+  icon.innerHTML = arrowSvg(m); // только числа, без пользовательских данных
+  const label = m.arrive ? (m.dist < 25 ? 'Вы на месте' : 'До места') : m.text;
+  return h('div', { class: 'turn' + (m.dist < 30 ? ' now' : '') },
+    icon,
+    h('div', { class: 'turn-text' },
+      m.arrive && m.dist < 25 ? null : h('div', { class: 'turn-dist' }, fmtKm(m.dist)),
+      h('div', { class: 'turn-label' }, label[0].toUpperCase() + label.slice(1))));
+}
+
+const fmtKm = (m) =>
+ (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
 const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
 
 function renderMap() {
@@ -317,15 +333,17 @@ function renderMap() {
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
         a?.geoApprox ? h('div', { class: 'map-approx' }, `⚠️ Точка примерная (${a.geoNote}). Нажми 📌 и поставь вход.`) : null,
         isHub && !hubSet ? h('div', { class: 'map-approx' }, '⚠️ Точка хаба примерная. Когда будешь у входа в хаб — нажми 📌 и поставь её.') : null,
-        h('div', { class: 'map-card-row' },
+        // Во время езды (карта следует за мной) карточка компактная, чтобы не закрывать карту.
+        nav.follow && nav.routeState === 'ok' ? null : h('div', { class: 'map-card-row' },
           h('div', { class: 'segmented small-seg' }, mapView.PROFILES.map((p) => h('button', {
+
             class: 'seg' + (state.profile === p.id ? ' on' : ''),
             onclick: () => { state.profile = p.id; store.set('profile', p.id); reroute(); },
           }, p.label))),
           h('button', { class: 'btn btn-icon', 'aria-label': 'Перестроить маршрут', onclick: reroute }, '↻')),
       );
     }
-    top.replaceChildren(card, ...banners);
+    top.replaceChildren(...[turnPanel(nav), card, ...banners].filter(Boolean));
 
     hubBtn.hidden = isHub || nav.picking;
     fabs.replaceChildren(...[

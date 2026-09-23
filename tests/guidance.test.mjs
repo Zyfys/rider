@@ -72,8 +72,8 @@ test('after arrival: silent, no reroute', () => {
   step(g, coords[coords.length - 1]);
   assert.equal(g.arrived, true);
   const far = [coords[0][0] + 0.01, coords[0][1]];
-  assert.deepEqual(step(g, far), { say: [], offRoute: false });
-  assert.deepEqual(step(g, far), { say: [], offRoute: false });
+  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 } });
+  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 } });
 });
 
 test('GPS jump far away near the route end does not trigger "Вы на месте"', () => {
@@ -85,4 +85,22 @@ test('GPS jump far away near the route end does not trigger "Вы на мест�
   assert.deepEqual(r1.say, []);
   assert.equal(g.arrived, false);
   assert.equal(step(g, jump).offRoute, true);
+});
+
+test('upcoming maneuver for the arrow panel counts down and ends with arrival', async () => {
+  const { upcoming } = await import('../js/guidance.js');
+  const g = buildGuide(coords, hints);
+  const first = upcoming(g, 0);
+  assert.equal(first.text, g.items[0].text);
+  assert.ok(first.dist > 0);
+  let prev = null;
+  const seen = [];
+  for (const p of ride(coords)) {
+    const r = step(g, p);
+    assert.ok(r.next, 'next always present on route');
+    const label = r.next.arrive ? 'arrive' : r.next.text;
+    if (label !== prev) { seen.push(label); prev = label; }
+  }
+  assert.equal(seen.at(-1), 'arrive');
+  assert.ok(seen.length >= 10, 'panel walks through the turns: ' + seen.join(','));
 });
