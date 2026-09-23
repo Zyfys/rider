@@ -1,0 +1,602 @@
+﻿import * as db from './db.js';
+import { parseAddress, addressKey, formatAddress, geoQuery, matches } from './address.js';
+import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
+
+const APP_VERSION = '1.0.0';
+
+// ---------- Мелкие помощники ----------
+
+// Построение DOM без innerHTML: пользовательский текст никогда не интерпретируется как HTML.
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else if (k === 'value') el.value = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of children.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    el.append(c instanceof Node ? c : String(c));
+  }
+  return el;
+}
+
+const $ = (sel) => document.querySelector(sel);
+
+const store = {
+  get(key, fallback) {
+    try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* хранилище недоступно — не критично */ }
+  },
+};
+
+let toastTimer;
+function toast(text) {
+  const el = $('#toast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const today = () => new Date().toISOString().slice(0, 10);
+const shortDate = (d = new Date()) => d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+
+// ---------- Озвучка (Speech Synthesis, системный голос телефона) ----------
+
+function germanVoice() {
+  const voices = speechSynthesis.getVoices();
+  return voices.find((v) => v.lang === 'de-DE') || voices.find((v) => v.lang?.startsWith('de'));
+}
+
+function speak(text, rate = 0.9) {
+  if (!('speechSynthesis' in window)) { toast('Озвучка не поддерживается'); return; }
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'de-DE';
+  u.rate = rate;
+  const v = germanVoice();
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+if ('speechSynthesis' in window) speechSynthesis.getVoices();
+
+// ---------- Состояние ----------
+
+const state = {
+  tab: store.get('tab', 'addresses'),
+  query: '',
+  addresses: [],
+  currentId: store.get('currentId', null),
+  phraseGroup: store.get('phraseGroup', PHRASES[0].id),
+  callMode: 'say',
+  heard: [],
+};
+
+async function loadAddresses() {
+  state.addresses = await db.getAll();
+}
+
+function currentAddress() {
+  return state.addresses.find((a) => a.id === state.currentId) || null;
+}
+
+function setCurrent(id) {
+  state.currentId = id;
+  store.set('currentId', id);
+}
+
+async function saveAddress(a) {
+  a.updatedAt = Date.now();
+  await db.put(a);
+  const i = state.addresses.findIndex((x) => x.id === a.id);
+  if (i >= 0) state.addresses[i] = a; else state.addresses.push(a);
+  navigator.storage?.persist?.();
+}
+
+// ---------- Навигация по вкладкам ----------
+
+const TABS = [
+  { id: 'addresses', icon: '🏠', label: 'Адреса', render: renderAddresses },
+  { id: 'phrases', icon: '💬', label: 'Фразы', render: renderPhrases },
+  { id: 'call', icon: '📞', label: 'Звонок', render: renderCall },
+  { id: 'checklist', icon: '✅', label: 'Чек-лист', render: renderChecklist },
+  { id: 'rules', icon: '🚦', label: 'ПДД', render: renderRules },
+];
+
+function renderNav() {
+  const nav = $('#nav');
+  nav.replaceChildren(...TABS.map((t) => h('button', {
+    class: 'nav-btn' + (state.tab === t.id ? ' active' : ''),
+    'aria-current': state.tab === t.id ? 'page' : null,
+    onclick: () => go(t.id),
+  }, h('span', { class: 'nav-icon', 'aria-hidden': 'true' }, t.icon), h('span', {}, t.label))));
+}
+
+function go(tab) {
+  state.tab = tab;
+  store.set('tab', tab);
+  render();
+  $('#main').scrollTop = 0;
+}
+
+function render() {
+  const tab = TABS.find((t) => t.id === state.tab) || TABS[0];
+  $('#title').textContent = tab.label;
+  renderNav();
+  $('#main').replaceChildren(tab.render());
+}
+
+// ---------- Экран «Адреса» ----------
+
+const MARKS = [
+  { id: 'green', label: 'Простой' },
+  { id: 'yellow', label: 'Средний' },
+  { id: 'red', label: 'Проблемный' },
+];
+
+function addressCard(a) {
+  const hint = [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ');
+  return h('button', { class: 'addr-card', onclick: () => openAddress(a.id) },
+    h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
+    h('span', { class: 'addr-text' },
+      h('span', { class: 'addr-main' }, `${a.street} ${a.house}`),
+      hint ? h('span', { class: 'addr-hint' }, hint) : h('span', { class: 'addr-hint muted' }, a.zip || 'нет заметок'),
+    ),
+  );
+}
+
+function renderAddresses() {
+  const wrap = h('div', { class: 'screen' });
+  const results = h('div', { class: 'list' });
+
+  const input = h('textarea', {
+    class: 'addr-input', rows: 2, value: state.query,
+    placeholder: 'Вставь адрес из Flink или начни вводить улицу',
+    autocomplete: 'off', autocapitalize: 'words', spellcheck: 'false',
+    oninput: (e) => { state.query = e.target.value; fill(); },
+  });
+
+  const pasteBtn = h('button', { class: 'btn btn-big', onclick: async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) { toast('Буфер обмена пуст'); return; }
+      state.query = text.trim();
+      input.value = state.query;
+      fill(true);
+    } catch {
+      toast('Нет доступа к буферу — вставь долгим нажатием');
+      input.focus();
+    }
+  } }, '📋 Вставить');
+
+  const clearBtn = h('button', { class: 'btn btn-big btn-ghost', onclick: () => {
+    state.query = ''; input.value = ''; fill(); input.focus();
+  } }, '✕ Очистить');
+
+  function fill(autoOpen = false) {
+    const q = state.query.trim();
+    const children = [];
+    if (!q) {
+      const recent = [...state.addresses].sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0)).slice(0, 30);
+      children.push(h('h2', { class: 'section-title' }, recent.length ? 'Последние адреса' : 'Адресов пока нет'));
+      if (!recent.length) children.push(h('p', { class: 'muted pad' }, 'Скопируй адрес в приложении Flink и нажми «Вставить». Заметки (код, этаж, вход) сохранятся только на этом телефоне.'));
+      children.push(...recent.map(addressCard));
+    } else {
+      const parsed = parseAddress(q);
+      const key = parsed.house ? addressKey(parsed.street, parsed.house) : null;
+      const exact = key && state.addresses.find((a) => a.key === key);
+      if (exact && autoOpen) { openAddress(exact.id); return; }
+
+      const found = exact ? [exact] : state.addresses.filter((a) => matches(a, q)).slice(0, 30);
+      if (!exact && parsed.street && parsed.house) {
+        children.push(h('button', { class: 'btn btn-primary btn-wide', onclick: () => createAddress(parsed) },
+          `＋ Новый адрес: ${parsed.street} ${parsed.house}`));
+      } else if (!exact && !found.length) {
+        children.push(h('p', { class: 'muted pad' }, 'Ничего не найдено. Для нового адреса нужен номер дома.'));
+      }
+      if (found.length) children.push(h('h2', { class: 'section-title' }, exact ? 'Уже есть в базе' : 'Найдено'));
+      children.push(...found.map(addressCard));
+    }
+    results.replaceChildren(...children);
+  }
+
+  wrap.append(
+    h('div', { class: 'addr-search' }, input, h('div', { class: 'row' }, pasteBtn, clearBtn)),
+    results,
+  );
+  fill();
+  return wrap;
+}
+
+async function createAddress(parsed) {
+  const a = {
+    id: uid(),
+    key: addressKey(parsed.street, parsed.house),
+    street: parsed.street, house: parsed.house, zip: parsed.zip, city: parsed.city || 'Dresden',
+    intercom: '', floor: '', entrance: '', bikeParking: '', elevator: '', comment: parsed.extra || '',
+    mark: null, createdAt: Date.now(), lastUsedAt: Date.now(),
+  };
+  await saveAddress(a);
+  state.query = '';
+  openAddress(a.id);
+}
+
+// Карточка адреса — полноэкранный лист поверх вкладок.
+async function openAddress(id) {
+  const a = state.addresses.find((x) => x.id === id);
+  if (!a) return;
+  a.lastUsedAt = Date.now();
+  await saveAddress(a);
+  setCurrent(a.id);
+
+  const save = debounce(() => saveAddress(a), 400);
+  const field = (name, label, opts = {}) => h('label', { class: 'field' },
+    h('span', { class: 'field-label' }, label),
+    h(opts.multiline ? 'textarea' : 'input', {
+      class: 'field-input' + (opts.big ? ' field-big' : ''),
+      value: a[name] || '', rows: opts.multiline ? 3 : null,
+      inputmode: opts.inputmode || null, placeholder: opts.placeholder || '',
+      autocomplete: 'off',
+      oninput: (e) => { a[name] = e.target.value; save(); },
+    }),
+  );
+
+  const segmented = (name, options) => {
+    const box = h('div', { class: 'segmented', role: 'group' });
+    const paint = () => box.replaceChildren(...options.map((o) => h('button', {
+      class: 'seg ' + (o.cls || '') + (a[name] === o.id ? ' on' : ''),
+      'aria-pressed': String(a[name] === o.id),
+      onclick: () => { a[name] = a[name] === o.id ? null : o.id; paint(); saveAddress(a); },
+    }, o.label)));
+    paint();
+    return box;
+  };
+
+  const geo = 'geo:0,0?q=' + encodeURIComponent(geoQuery(a));
+
+  openSheet(`${a.street} ${a.house}`, h('div', { class: 'screen' },
+    h('p', { class: 'muted' }, [a.zip, a.city].filter(Boolean).join(' ')),
+    h('a', { class: 'btn btn-primary btn-wide', href: geo }, '🧭 Открыть в навигаторе'),
+    h('p', { class: 'hint' }, 'Откроется выбор: OsmAnd, Organic Maps и т.п.'),
+    h('div', { class: 'field-label' }, 'Метка'),
+    segmented('mark', MARKS.map((m) => ({ ...m, cls: 'seg-' + m.id }))),
+    field('intercom', 'Код домофона', { big: true, inputmode: 'text', placeholder: '—' }),
+    field('floor', 'Этаж', { placeholder: 'напр. 3 (2. OG)' }),
+    field('entrance', 'Подъезд / вход', { placeholder: 'со двора, вторая дверь…' }),
+    field('bikeParking', 'Где пристегнуть велосипед'),
+    h('div', { class: 'field-label' }, 'Лифт'),
+    segmented('elevator', [{ id: 'yes', label: 'Есть' }, { id: 'no', label: 'Нет' }]),
+    field('comment', 'Комментарий', { multiline: true }),
+    h('p', { class: 'hint' }, 'Имена клиентов не записывай — хватит адреса и технических заметок.'),
+    h('button', { class: 'btn btn-wide', onclick: () => { closeSheet(); go('call'); } }, '📞 Помощник звонка'),
+    h('button', { class: 'btn btn-wide btn-danger-ghost', onclick: async () => {
+      if (!confirm(`Удалить адрес ${a.street} ${a.house}?`)) return;
+      await db.remove(a.id);
+      state.addresses = state.addresses.filter((x) => x.id !== a.id);
+      if (state.currentId === a.id) setCurrent(null);
+      closeSheet();
+      toast('Адрес удалён');
+    } }, 'Удалить адрес'),
+  ));
+}
+
+// ---------- Экран «Фразы» ----------
+
+function phraseCard(p) {
+  return h('div', { class: 'phrase' },
+    h('div', { class: 'phrase-ru' }, p.ru),
+    h('div', { class: 'phrase-de', lang: 'de' }, p.de),
+    h('div', { class: 'phrase-tr' }, p.tr),
+    h('div', { class: 'phrase-actions' },
+      h('button', { class: 'btn', onclick: () => speak(p.de) }, '🔊 Слушать'),
+      h('button', { class: 'btn', onclick: () => showFullscreen(p) }, '⛶ Показать'),
+    ),
+  );
+}
+
+function renderPhrases() {
+  const group = PHRASES.find((g) => g.id === state.phraseGroup) || PHRASES[0];
+  return h('div', { class: 'screen' },
+    h('div', { class: 'segmented sticky' }, PHRASES.map((g) => h('button', {
+      class: 'seg' + (g.id === group.id ? ' on' : ''),
+      onclick: () => { state.phraseGroup = g.id; store.set('phraseGroup', g.id); render(); },
+    }, g.title))),
+    group.items.map(phraseCard),
+  );
+}
+
+function showFullscreen(p) {
+  const fs = $('#fullscreen');
+  fs.replaceChildren(
+    h('div', { class: 'fs-de', lang: 'de' }, p.de),
+    h('div', { class: 'fs-tr' }, p.tr),
+    h('div', { class: 'fs-ru' }, p.ru),
+    h('div', { class: 'row fs-actions' },
+      h('button', { class: 'btn btn-big', onclick: (e) => { e.stopPropagation(); speak(p.de); } }, '🔊'),
+      h('button', { class: 'btn btn-big', onclick: (e) => { e.stopPropagation(); speak(p.de, 0.6); } }, '🐢 Медленно'),
+    ),
+    h('div', { class: 'fs-close' }, 'Нажми в любом месте, чтобы закрыть'),
+  );
+  fs.hidden = false;
+  fs.onclick = () => { hideFullscreen(); popOverlay(); };
+  pushOverlay();
+}
+
+function hideFullscreen() {
+  $('#fullscreen').hidden = true;
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+}
+
+// ---------- Экран «Звонок» ----------
+
+// Разносит услышанное по полям заметки: этаж → «Этаж», лифт → «Лифт», где дом → «Вход», остальное → комментарий.
+function applyHeard(a, items) {
+  const other = [];
+  for (const it of items) {
+    if (!it.note) continue;
+    if (it.note.startsWith('этаж: ')) a.floor = it.note.slice(6);
+    else if (it.note === 'есть лифт') a.elevator = 'yes';
+    else if (it.group === 'Где дом') a.entrance = [a.entrance, it.note].filter(Boolean).join(', ');
+    else other.push(it.note);
+  }
+  if (other.length) a.comment = [a.comment, `📞 ${shortDate()}: ${other.join(', ')}`].filter(Boolean).join('\n');
+}
+
+function renderCall() {
+  const a = currentAddress();
+  const wrap = h('div', { class: 'screen' });
+
+  wrap.append(a
+    ? h('button', { class: 'current-addr', onclick: () => openAddress(a.id) },
+        h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
+        h('span', { class: 'addr-text' },
+          h('span', { class: 'muted small' }, 'Текущий адрес'),
+          h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)))
+    : h('button', { class: 'current-addr empty', onclick: () => go('addresses') }, 'Адрес не выбран — выбрать в «Адресах»'));
+
+  wrap.append(h('div', { class: 'segmented sticky' },
+    [['say', '🗣 Я говорю'], ['heard', '👂 Он сказал']].map(([id, label]) => h('button', {
+      class: 'seg' + (state.callMode === id ? ' on' : ''),
+      onclick: () => { state.callMode = id; render(); },
+    }, label))));
+
+  if (state.callMode === 'say') {
+    wrap.append(...CALL_SAY.map((p) => h('div', { class: 'phrase phrase-compact' },
+      h('div', { class: 'phrase-de', lang: 'de' }, p.de),
+      h('div', { class: 'phrase-tr' }, p.tr),
+      h('div', { class: 'phrase-row' },
+        h('span', { class: 'phrase-ru' }, p.ru),
+        h('button', { class: 'btn btn-icon', 'aria-label': 'Слушать', onclick: () => speak(p.de) }, '🔊')),
+    )));
+    return wrap;
+  }
+
+  const isOn = (it) => state.heard.includes(it);
+  for (const g of CALL_HEARD) {
+    wrap.append(h('h2', { class: 'section-title' }, g.group));
+    const grid = h('div', { class: 'heard-grid' });
+    for (const it of g.items) {
+      it.group = g.group;
+      const btn = h('button', {
+        class: 'heard' + (isOn(it) ? ' on' : ''),
+        'aria-pressed': String(isOn(it)),
+        onclick: () => {
+          state.heard = isOn(it) ? state.heard.filter((x) => x !== it) : [...state.heard, it];
+          btn.classList.toggle('on', isOn(it));
+          btn.setAttribute('aria-pressed', String(isOn(it)));
+          updateBar();
+        },
+      },
+        h('span', { class: 'heard-de', lang: 'de' }, it.de),
+        h('span', { class: 'heard-tr' }, it.tr),
+        h('span', { class: 'heard-ru' }, it.ru));
+      grid.append(btn);
+    }
+    wrap.append(grid);
+  }
+
+  const codeInput = h('input', { class: 'field-input field-big', placeholder: 'код двери, если назвали', autocomplete: 'off' });
+  wrap.append(h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Код домофона'), codeInput));
+
+  const bar = h('div', { class: 'save-bar' });
+  function updateBar() {
+    const n = state.heard.length;
+    bar.replaceChildren(h('button', {
+      class: 'btn btn-primary btn-wide',
+      disabled: !a || (!n && !codeInput.value.trim()),
+      onclick: async () => {
+        applyHeard(a, state.heard);
+        if (codeInput.value.trim()) a.intercom = codeInput.value.trim();
+        await saveAddress(a);
+        state.heard = [];
+        toast('Сохранено в заметку');
+        render();
+      },
+    }, a ? `💾 Сохранить в заметку${n ? ` (${n})` : ''}` : 'Сначала выбери адрес'));
+  }
+  codeInput.addEventListener('input', updateBar);
+  updateBar();
+  wrap.append(bar);
+  return wrap;
+}
+
+// ---------- Экран «Чек-лист» ----------
+
+function renderChecklist() {
+  // Отметки живут один день: на следующий день чек-лист снова пустой.
+  let saved = store.get('checklist', {});
+  if (saved.date !== today()) saved = { date: today(), done: [] };
+  const done = new Set(saved.done);
+  const persist = () => store.set('checklist', { date: saved.date, done: [...done] });
+
+  const all = CHECKLIST.flatMap((g) => g.items);
+  const progress = h('div', { class: 'progress' });
+  const paintProgress = () => {
+    const n = all.filter((i) => done.has(i)).length;
+    progress.textContent = n === all.length ? 'Всё готово 👍' : `Готово ${n} из ${all.length}`;
+  };
+  paintProgress();
+
+  return h('div', { class: 'screen' },
+    progress,
+    CHECKLIST.map((g) => [
+      h('h2', { class: 'section-title' }, g.group),
+      g.items.map((item) => {
+        const btn = h('button', {
+          class: 'check' + (done.has(item) ? ' on' : ''),
+          role: 'checkbox', 'aria-checked': String(done.has(item)),
+          onclick: () => {
+            done.has(item) ? done.delete(item) : done.add(item);
+            btn.classList.toggle('on', done.has(item));
+            btn.setAttribute('aria-checked', String(done.has(item)));
+            persist(); paintProgress();
+          },
+        }, h('span', { class: 'check-box', 'aria-hidden': 'true' }), h('span', {}, item));
+        return btn;
+      }),
+    ]),
+    h('button', { class: 'btn btn-wide btn-ghost', onclick: () => { store.set('checklist', {}); render(); } }, 'Сбросить отметки'),
+  );
+}
+
+// ---------- Экран «ПДД» ----------
+
+function renderRules() {
+  return h('div', { class: 'screen' },
+    RULES.map((sec, i) => h('details', { class: 'rules', open: i === 0 || null },
+      h('summary', {}, sec.title),
+      h('ul', {}, sec.items.map((it) => typeof it === 'string'
+        ? h('li', {}, it)
+        : h('li', { class: 'fine' }, '💶 ', it.text))),
+    )),
+  );
+}
+
+// ---------- Лист (оверлей) и настройки ----------
+
+// Кнопка «Назад» на Android закрывает лист/полный экран, а не приложение:
+// при открытии добавляем запись в историю, при закрытии — снимаем её.
+function pushOverlay() {
+  if (history.state?.overlay) return;
+  history.pushState({ overlay: true }, '');
+}
+
+function popOverlay() {
+  if (history.state?.overlay) history.back();
+}
+
+window.addEventListener('popstate', () => {
+  if (!$('#fullscreen').hidden) { hideFullscreen(); if (!$('#sheet').hidden) pushOverlay(); return; }
+  if (!$('#sheet').hidden) { $('#sheet').hidden = true; render(); }
+});
+
+function openSheet(title, content) {
+  $('#sheet-title').textContent = title;
+  $('#sheet-body').replaceChildren(content);
+  $('#sheet').hidden = false;
+  $('#sheet-body').scrollTop = 0;
+  pushOverlay();
+}
+
+function closeSheet() {
+  $('#sheet').hidden = true;
+  popOverlay();
+  render();
+}
+
+function download(filename, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = h('a', { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openSettings() {
+  const fileInput = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onchange: async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const items = Array.isArray(data.addresses) ? data.addresses : [];
+      const valid = items.filter((a) => a && a.id && a.street);
+      for (const a of valid) a.key = addressKey(a.street, a.house);
+      await db.putMany(valid);
+      await loadAddresses();
+      toast(`Импортировано адресов: ${valid.length}`);
+      openSettings();
+    } catch {
+      toast('Не удалось прочитать файл');
+    }
+  } });
+
+  let armed = false;
+  const deleteBtn = h('button', { class: 'btn btn-wide btn-danger', onclick: async () => {
+    if (!armed) {
+      armed = true;
+      deleteBtn.textContent = '⚠️ Точно удалить? Нажми ещё раз';
+      setTimeout(() => { armed = false; deleteBtn.textContent = '🗑 Удалить все данные'; }, 5000);
+      return;
+    }
+    await db.destroy();
+    try { localStorage.clear(); } catch { /* уже пусто */ }
+    state.addresses = []; state.currentId = null; state.heard = []; state.query = '';
+    toast('Все данные удалены');
+    closeSheet();
+  } }, '🗑 Удалить все данные');
+
+  const de = germanVoice();
+  openSheet('Данные и настройки', h('div', { class: 'screen' },
+    h('div', { class: 'info-box' },
+      h('strong', {}, `Адресов в базе: ${state.addresses.length}`),
+      h('p', {}, 'Все данные хранятся только на этом телефоне. Приложение ничего не отправляет в интернет.'),
+    ),
+    h('h2', { class: 'section-title' }, 'Резервная копия'),
+    h('button', { class: 'btn btn-wide', onclick: () => {
+      download(`flink-helper-backup-${today()}.json`, JSON.stringify({ app: 'flink-helper', version: APP_VERSION, exportedAt: new Date().toISOString(), addresses: state.addresses }, null, 2));
+    } }, '⬇️ Экспорт в файл'),
+    h('button', { class: 'btn btn-wide', onclick: () => fileInput.click() }, '⬆️ Импорт из файла'),
+    fileInput,
+    h('p', { class: 'hint' }, 'Файл копии содержит адреса и коды — это данные Flink. Не пересылай его никому.'),
+    h('h2', { class: 'section-title' }, 'Удаление'),
+    deleteBtn,
+    h('p', { class: 'hint' }, 'При увольнении данные компании нужно удалить (§ 10 контракта). Кнопка стирает адреса, заметки и отметки чек-листа.'),
+    h('h2', { class: 'section-title' }, 'Голос'),
+    h('p', { class: 'hint' }, de ? `Немецкий голос: ${de.name}` : 'Немецкий голос не найден. Android: Настройки → Язык и ввод → Синтез речи → Google → установить «Deutsch».'),
+    h('button', { class: 'btn btn-wide', onclick: () => speak('Hallo, hier ist Ihre Bestellung von Flink.') }, '🔊 Проверить голос'),
+    h('p', { class: 'hint center' }, `Flink Helper Dresden · v${APP_VERSION}`),
+  ));
+}
+
+// ---------- Запуск ----------
+
+async function init() {
+  $('#settings-btn').addEventListener('click', openSettings);
+  $('#sheet-close').addEventListener('click', closeSheet);
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('#fullscreen').hidden) $('#fullscreen').click();
+    else if (!$('#sheet').hidden) closeSheet();
+  });
+  await loadAddresses();
+  render();
+
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  }
+}
+
+init();

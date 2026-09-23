@@ -1,0 +1,7 @@
+# Личный план с условиями контракта — не публиковать
+flink-dresden-app-plan.md
+
+# Резервные копии базы адресов (персональные данные Flink)
+flink-helper-backup-*.json
+
+node_modules/
