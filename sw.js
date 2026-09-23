@@ -2,7 +2,7 @@
 //
 // Файлы приложения — «сначала сеть»: при интернете всегда свежая версия,
 // без интернета — сохранённая копия. Версию CACHE менять при изменении списка FILES.
-const CACHE = 'flink-helper-v5';
+const CACHE = 'flink-helper-v6';
 const TILES = 'flink-helper-tiles';
 const MAX_TILES = 4000;
 const NETWORK_TIMEOUT = 3000;
@@ -60,7 +60,9 @@ self.addEventListener('fetch', (event) => {
 
 async function networkFirst(req, cacheName = CACHE) {
   const cache = await caches.open(cacheName);
-  const net = fetch(req).then((res) => {
+  // no-cache: не брать файл из HTTP-кэша браузера, а сверить с сервером (быстро, по ETag).
+  const net = fetch(req, { cache: 'no-cache' }).then((res) => {
+
     if (res.ok) cache.put(req, res.clone());
     return res;
   });

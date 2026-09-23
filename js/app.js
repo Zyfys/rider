@@ -6,7 +6,7 @@ import * as mapView from './map.js';
 import { summary } from './guidance.js';
 import { arrowSvg } from './arrows.js';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -872,7 +872,21 @@ async function init() {
   render();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    // Установленное приложение Android держит в памяти и при возврате не перезагружает,
+    // поэтому проверяем обновления сами: при каждом возврате в приложение и раз в 30 минут.
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
+      const check = () => reg.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
+      setInterval(check, 30 * 60 * 1000);
+    }).catch(() => {});
+    // Новая версия активировалась — сразу показываем её (если не открыта карточка с вводом).
+    let hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) { hadController = true; return; }
+      if ($('#sheet').hidden) location.reload();
+      else toast('Есть новая версия — перезапусти приложение');
+    });
+
   }
 }
 
