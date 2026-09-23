@@ -3,8 +3,9 @@ import { parseAddress, addressKey, formatAddress, geoQuery, matches } from './ad
 import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
 import { geocode, HUB } from './geocode.js';
 import * as mapView from './map.js';
+import { summary } from './guidance.js';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -74,6 +75,32 @@ function speak(text, rate = 0.9) {
 
 if ('speechSynthesis' in window) speechSynthesis.getVoices();
 
+// Голос навигации — русский системный голос. Фразы встают в очередь, не перебивая друг друга.
+function speakRu(text) {
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ru-RU';
+  const voices = speechSynthesis.getVoices();
+  const v = voices.find((x) => x.lang === 'ru-RU') || voices.find((x) => x.lang?.startsWith('ru'));
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+// Экран не гаснет, пока едем по маршруту: иначе телефон перестаёт получать GPS и голос молчит.
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && !wakeLock && document.visibilityState === 'visible' && 'wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch { /* нет поддержки или экран уже выключен */ }
+}
+document.addEventListener('visibilitychange', () => { if (mapView.nav.dest) keepAwake(true); });
+
 // ---------- Состояние ----------
 
 const state = {
@@ -85,6 +112,8 @@ const state = {
   callMode: 'say',
   heard: [],
   routeTo: store.get('routeTo', null),
+  voice: store.get('voice', true),
+  theme: store.get('theme', 'dark'),
   profile: store.get('profile', 'fastbike'),
 };
 
@@ -209,6 +238,37 @@ async function setHubPoint() {
   showHub();
 }
 
+// ---------- Голосовые подсказки ----------
+
+let lastReroute = 0;
+mapView.onGuide((e) => {
+  if (e.routeReady) {
+    keepAwake(true);
+    if (state.voice) speakRu(summary(e.routeReady.length, e.routeReady.time));
+  }
+  if (e.say && state.voice) e.say.forEach(speakRu);
+  if (e.pedZone && state.voice) speakRu('Пешеходная зона. Ведите велосипед.');
+  if (e.offRoute && Date.now() - lastReroute > 30000) {
+    lastReroute = Date.now();
+    if (state.voice) speakRu('Вы ушли с маршрута. Перестраиваю.');
+    rerouteCurrent();
+  }
+});
+
+function rerouteCurrent() {
+  if (state.routeTo === HUB_ID) { showHub(); return; }
+  const a = state.addresses.find((x) => x.id === state.routeTo);
+  if (a) showRoute(a);
+}
+
+function toggleVoice() {
+  state.voice = !state.voice;
+  store.set('voice', state.voice);
+  if (state.voice) speakRu('Голосовые подсказки включены');
+  else if ('speechSynthesis' in window) speechSynthesis.cancel();
+  toast(state.voice ? '🔊 Голос включён' : '🔇 Голос выключен');
+}
+
 const fmtKm = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
 const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
 
@@ -251,7 +311,7 @@ function renderMap() {
               h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
               h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)),
           h('button', { class: 'btn btn-icon btn-ghost', 'aria-label': 'Убрать маршрут', onclick: () => {
-            state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); paint(mapView.nav);
+            state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); keepAwake(false); paint(mapView.nav);
           } }, '✕')),
         status ? h('div', { class: 'map-status' }, status) : null,
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
@@ -272,7 +332,10 @@ function renderMap() {
       a || isHub ? h('button', { class: 'fab' + (nav.picking ? ' on' : ''), 'aria-label': isHub ? 'Поставить точку хаба' : 'Поставить точку входа',
         onclick: () => (nav.picking ? mapView.cancelPick() : isHub ? setHubPoint() : setEntrance(a)) }, '📌') : null,
       (a || isHub) && nav.dest ? h('button', { class: 'fab', 'aria-label': 'Показать весь маршрут', onclick: () => mapView.fitRoute() }, '⤢') : null,
+      h('button', { class: 'fab', 'aria-label': state.voice ? 'Выключить голос' : 'Включить голос',
+        onclick: () => { toggleVoice(); paint(mapView.nav); } }, state.voice ? '🔊' : '🔇'),
       h('button', { class: 'fab' + (nav.follow ? ' on' : ''), 'aria-label': 'Моё местоположение', onclick: () => mapView.followMe() }, '◎'),
+
     ].filter(Boolean));
 
   };
@@ -752,10 +815,32 @@ function openSettings() {
   ));
 }
 
+// ---------- Тема ----------
+
+function applyTheme() {
+  const light = state.theme === 'light';
+  document.documentElement.dataset.theme = state.theme;
+  document.querySelector('meta[name="theme-color"]').content = light ? '#f3f4f6' : '#0e1013';
+  document.querySelector('meta[name="color-scheme"]').content = light ? 'light' : 'dark';
+  const btn = $('#theme-btn');
+  btn.textContent = light ? '🌙' : '☀️';
+  btn.setAttribute('aria-label', light ? 'Тёмная тема' : 'Светлая тема');
+  mapView.setTheme(state.theme);
+}
+
+function toggleTheme() {
+  state.theme = state.theme === 'light' ? 'dark' : 'light';
+  store.set('theme', state.theme);
+  applyTheme();
+}
+
 // ---------- Запуск ----------
 
 async function init() {
   $('#settings-btn').addEventListener('click', openSettings);
+  $('#theme-btn').addEventListener('click', toggleTheme);
+  applyTheme();
+
   $('#sheet-close').addEventListener('click', closeSheet);
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;

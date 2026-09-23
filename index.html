@@ -13,11 +13,17 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="vendor/maplibre-gl.css">
   <link rel="stylesheet" href="css/style.css">
+  <script>
+    // Тема до загрузки страницы — чтобы не мигало тёмным при светлой теме.
+    try { if (JSON.parse(localStorage.getItem('theme')) === 'light') document.documentElement.dataset.theme = 'light'; } catch {}
+  </script>
 </head>
 <body>
   <header class="topbar">
     <h1 id="title">Flink Helper</h1>
-    <button id="settings-btn" class="btn btn-ghost topbar-btn" aria-label="Данные и настройки">⚙️ Данные</button>
+    <button id="theme-btn" class="btn btn-ghost topbar-btn theme-btn" aria-label="Светлая тема">☀️</button>
+    <button id="settings-btn"
+ class="btn btn-ghost topbar-btn" aria-label="Данные и настройки">⚙️ Данные</button>
   </header>
 
   <main id="main"></main>

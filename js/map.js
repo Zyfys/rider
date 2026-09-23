@@ -1,7 +1,8 @@
 ﻿// Карта (MapLibre) + GPS + маршрут по велопрофилю BRouter.
 // Сознательно без пошаговых команд и автоперестроения: линия маршрута + своя точка.
-import { buildStyle, addOverlayLayers } from './map-style.js';
+import { buildStyle, addOverlayLayers, applyTheme } from './map-style.js';
 import { HUB } from './geocode.js';
+import { buildGuide, step } from './guidance.js';
 
 export const PROFILES = [
   { id: 'fastbike', label: 'Быстрый' },
@@ -26,6 +27,11 @@ let loaded = null;
 let routeToken = 0;
 let routeCoords = [];
 let listener = () => {};
+let theme = 'dark';
+let guide = null;
+// События для голоса: { say: [фразы] } | { routeReady: {length, time} } | { offRoute: true } | { pedZone: true }
+let guideListener = () => {};
+export const onGuide = (fn) => { guideListener = fn; };
 
 export let cancelPick = () => {};
 
@@ -43,7 +49,7 @@ export async function getMapElement() {
   const ml = await import('../vendor/maplibre-gl.mjs');
   map = new ml.Map({
     container: el,
-    style: buildStyle(),
+    style: buildStyle(theme),
     center: [HUB.lon, HUB.lat],
     zoom: 14.5,
     maxZoom: 19,
@@ -53,7 +59,7 @@ export async function getMapElement() {
   });
   map.touchZoomRotate.disableRotation();
   loaded = new Promise((resolve) => map.on('load', () => {
-    addOverlayLayers(map);
+    addOverlayLayers(map, theme);
     // Подпись авторов карты по умолчанию раскрыта и закрывает низ экрана — сворачиваем в значок «i».
     el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
     resolve();
@@ -64,7 +70,15 @@ export async function getMapElement() {
   return el;
 }
 
+export async function setTheme(t) {
+  theme = t;
+  if (!map) return;
+  await loaded;
+  applyTheme(map, t);
+}
+
 export function resize() {
+
   map?.resize();
 }
 
@@ -79,7 +93,14 @@ function startGps() {
     await loaded;
     map.getSource('me').setData(fc([point(nav.me.lon, nav.me.lat)]));
     if (nav.follow && !nav.picking) map.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: first ? Math.max(map.getZoom(), 16.5) : map.getZoom(), duration: first ? 0 : 600 });
+    const wasInZone = nav.inPedZone;
     checkPedZone();
+    if (nav.inPedZone && !wasInZone) guideListener({ pedZone: true });
+    if (guide && !nav.picking) {
+      const r = step(guide, [nav.me.lon, nav.me.lat]);
+      if (r.say.length) guideListener({ say: r.say });
+      if (r.offRoute) guideListener({ offRoute: true });
+    }
     emit();
   }, (err) => {
     nav.gps = err.code === 1 ? 'denied' : 'unavailable';
@@ -116,10 +137,11 @@ export async function routeTo(dest, profile) {
   map.getSource('dest').setData(fc([point(dest.lon, dest.lat, { approx: !!dest.approx })]));
   map.getSource('route').setData(fc([]));
   routeCoords = [];
+  guide = null;
 
   const start = (await waitForFix(6000)) || HUB;
   if (token !== routeToken) return;
-  const url = `https://brouter.de/brouter?lonlats=${start.lon.toFixed(6)},${start.lat.toFixed(6)}|${dest.lon.toFixed(6)},${dest.lat.toFixed(6)}&profile=${profile}&alternativeidx=0&format=geojson`;
+  const url = `https://brouter.de/brouter?lonlats=${start.lon.toFixed(6)},${start.lat.toFixed(6)}|${dest.lon.toFixed(6)},${dest.lat.toFixed(6)}&profile=${profile}&alternativeidx=0&format=geojson&timode=2`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
     if (!res.ok) throw new Error(await res.text());
@@ -130,6 +152,8 @@ export async function routeTo(dest, profile) {
     nav.routeState = 'ok';
     routeCoords = gj.features[0].geometry.coordinates.map((c) => [c[0], c[1]]);
     map.getSource('route').setData(gj);
+    guide = buildGuide(routeCoords, props.voicehints || []);
+    guideListener({ routeReady: nav.route });
     fitRoute();
   } catch {
     if (token !== routeToken) return;
@@ -148,7 +172,9 @@ export async function clearRoute() {
   map.getSource('dest').setData(fc([]));
   map.getSource('route').setData(fc([]));
   routeCoords = [];
+  guide = null;
   emit();
+
 }
 
 export function fitRoute() {

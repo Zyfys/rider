@@ -10,11 +10,35 @@
   --red: #ff6464;
   --yellow: #ffc53d;
   --green: #4cd98a;
+  --warn-text: #ffc53d;
+  --accent-soft: #10283a;
+  --overlay: rgba(24, 27, 32, .94);
+  --overlay-2: rgba(34, 38, 45, .95);
   --radius: 14px;
   --tap: 56px;
   --nav-h: 72px;
   --top-h: 60px;
   color-scheme: dark;
+}
+
+/* Светлая тема — для яркого солнца. Переключается кнопкой ☀️/🌙 в верхней панели. */
+:root[data-theme="light"] {
+  --bg: #f3f4f6;
+  --surface: #ffffff;
+  --surface-2: #e9ecf0;
+  --line: #d0d5dc;
+  --text: #111418;
+  --muted: #56606b;
+  --accent: #0a6fc2;
+  --accent-ink: #ffffff;
+  --red: #e04848;
+  --yellow: #f2b705;
+  --green: #2fbf6b;
+  --warn-text: #8f5a00;
+  --accent-soft: #dcecff;
+  --overlay: rgba(255, 255, 255, .96);
+  --overlay-2: rgba(255, 255, 255, .97);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -47,6 +71,8 @@ button, input, textarea { font: inherit; color: inherit; }
 }
 .topbar h1 { flex: 1; margin: 0; font-size: 22px; font-weight: 700; }
 .topbar-btn { min-height: 44px; padding: 0 14px; font-size: 16px; }
+.theme-btn { min-width: 48px; padding: 0; font-size: 22px; }
+
 
 /* ---------- Основная область и навигация ---------- */
 
@@ -283,7 +309,7 @@ main {
   text-align: left;
   cursor: pointer;
 }
-.heard.on { border-color: var(--accent); background: #10283a; }
+.heard.on { border-color: var(--accent); background: var(--accent-soft); }
 .heard-de { font-size: 18px; font-weight: 700; }
 .heard-tr { font-size: 14px; color: var(--accent); }
 .heard-ru { font-size: 15px; color: var(--muted); }
@@ -318,8 +344,8 @@ main.is-map { position: relative; overflow: hidden; }
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: rgba(24, 27, 32, .94);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, .4);
+  background: var(--overlay);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
 }
 .map-card-row { display: flex; align-items: center; gap: 8px; }
 .map-dest {
@@ -337,7 +363,7 @@ main.is-map { position: relative; overflow: hidden; }
 }
 .map-dest .addr-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .map-status { font-size: 18px; font-weight: 700; color: var(--accent); }
-.map-approx { font-size: 15px; color: var(--yellow); }
+.map-approx { font-size: 15px; color: var(--warn-text); }
 .small-seg { flex: 1; }
 .small-seg .seg { min-height: 44px; font-size: 16px; }
 .map-banner {
@@ -363,10 +389,10 @@ main.is-map { position: relative; overflow: hidden; }
   width: 60px; height: 60px;
   border: 1px solid var(--line);
   border-radius: 50%;
-  background: rgba(34, 38, 45, .95);
+  background: var(--overlay-2);
   color: var(--text);
   font-size: 26px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, .45);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
   cursor: pointer;
 }
 .fab.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
@@ -443,7 +469,7 @@ main.is-map { position: relative; overflow: hidden; }
 .rules summary::after { content: '▾'; margin-left: auto; color: var(--muted); transition: transform .15s; }
 .rules[open] summary::after { transform: rotate(180deg); }
 .rules ul { margin: 0; padding: 0 16px 16px 36px; display: flex; flex-direction: column; gap: 10px; }
-.rules li.fine { color: var(--yellow); list-style: none; margin-left: -20px; }
+.rules li.fine { color: var(--warn-text); list-style: none; margin-left: -20px; }
 
 /* ---------- Лист поверх экрана ---------- */
 
