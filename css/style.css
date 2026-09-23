@@ -68,7 +68,7 @@ main {
 .bottom-nav {
   flex: none;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   min-height: var(--nav-h);
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--surface);
@@ -83,9 +83,10 @@ main {
   border: 0;
   background: none;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   cursor: pointer;
 }
+
 .nav-icon { font-size: 24px; line-height: 1; filter: grayscale(1) opacity(.7); }
 .nav-btn.active { color: var(--text); box-shadow: inset 0 3px 0 var(--accent); }
 .nav-btn.active .nav-icon { filter: none; }
@@ -294,6 +295,83 @@ main {
   padding: 10px 0 4px;
   background: linear-gradient(transparent, var(--bg) 30%);
 }
+
+/* ---------- Карта ---------- */
+
+main.is-map { position: relative; overflow: hidden; }
+.map-screen { position: absolute; inset: 0; }
+.map { position: absolute; inset: 0; background: var(--bg); }
+.map-top {
+  position: absolute;
+  top: 10px; left: 10px; right: 10px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.map-top > * { pointer-events: auto; }
+.map-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(24, 27, 32, .94);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .4);
+}
+.map-card-row { display: flex; align-items: center; gap: 8px; }
+.map-dest {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.map-dest .addr-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-status { font-size: 18px; font-weight: 700; color: var(--accent); }
+.map-approx { font-size: 15px; color: var(--yellow); }
+.small-seg { flex: 1; }
+.small-seg .seg { min-height: 44px; font-size: 16px; }
+.map-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  font-weight: 700;
+}
+.map-banner.warn { background: var(--red); color: #1a0505; }
+.map-banner.info { background: var(--accent); color: var(--accent-ink); }
+.banner-btn { min-height: 40px; margin-left: auto; border-color: currentColor; color: inherit; }
+.map-fabs {
+  position: absolute;
+  right: 12px; bottom: 36px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fab {
+  width: 60px; height: 60px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: rgba(34, 38, 45, .95);
+  color: var(--text);
+  font-size: 26px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .45);
+  cursor: pointer;
+}
+.fab.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn-small-text { font-size: 15px; padding: 0 8px; }
+.maplibregl-ctrl-attrib { font-size: 11px; }
 
 /* ---------- Чек-лист ---------- */
 

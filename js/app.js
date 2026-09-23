@@ -1,8 +1,10 @@
 ﻿import * as db from './db.js';
 import { parseAddress, addressKey, formatAddress, geoQuery, matches } from './address.js';
 import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
+import { geocode } from './geocode.js';
+import * as mapView from './map.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.5.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -75,13 +77,15 @@ if ('speechSynthesis' in window) speechSynthesis.getVoices();
 // ---------- Состояние ----------
 
 const state = {
-  tab: store.get('tab', 'addresses'),
+  tab: store.get('tab', 'map'),
   query: '',
   addresses: [],
   currentId: store.get('currentId', null),
   phraseGroup: store.get('phraseGroup', PHRASES[0].id),
   callMode: 'say',
   heard: [],
+  routeTo: store.get('routeTo', null),
+  profile: store.get('profile', 'fastbike'),
 };
 
 async function loadAddresses() {
@@ -108,6 +112,7 @@ async function saveAddress(a) {
 // ---------- Навигация по вкладкам ----------
 
 const TABS = [
+  { id: 'map', icon: '🗺️', label: 'Карта', render: renderMap },
   { id: 'addresses', icon: '🏠', label: 'Адреса', render: renderAddresses },
   { id: 'phrases', icon: '💬', label: 'Фразы', render: renderPhrases },
   { id: 'call', icon: '📞', label: 'Звонок', render: renderCall },
@@ -135,10 +140,126 @@ function render() {
   const tab = TABS.find((t) => t.id === state.tab) || TABS[0];
   $('#title').textContent = tab.label;
   renderNav();
+  $('#main').classList.toggle('is-map', tab.id === 'map');
   $('#main').replaceChildren(tab.render());
 }
 
+// ---------- Экран «Карта» ----------
+
+// Координаты адреса: из офлайн-базы OSM, один раз, потом хранятся в записи адреса.
+async function ensureCoords(a) {
+  if (a.lat) return a;
+  const r = await geocode(a);
+  if (!r) return null;
+  Object.assign(a, { lat: r.lat, lon: r.lon, geoApprox: r.approx, geoNote: r.note });
+  await saveAddress(a);
+  return a;
+}
+
+async function showRoute(a) {
+  state.routeTo = a.id;
+  store.set('routeTo', a.id);
+  setCurrent(a.id);
+  if (state.tab !== 'map') go('map');
+  await mapView.getMapElement();
+
+  let found;
+  try { found = await ensureCoords(a); } catch { toast('Не удалось загрузить базу адресов'); return; }
+  if (!found) {
+    toast('Адрес не найден в OSM — поставь точку вручную 📌');
+    mapView.nav.dest = null;
+    setEntrance(a);
+    return;
+  }
+  mapView.routeTo({ lat: a.lat, lon: a.lon, approx: a.geoApprox }, state.profile);
+}
+
+// Поставить точку входа нажатием на карту — сохраняется в адрес и используется в следующий раз.
+async function setEntrance(a) {
+  const p = await mapView.pickPoint();
+  if (!p) return;
+  Object.assign(a, { lat: +p.lat.toFixed(6), lon: +p.lon.toFixed(6), geoApprox: false, geoNote: 'точка входа поставлена вручную' });
+  await saveAddress(a);
+  toast('Точка входа сохранена');
+  mapView.routeTo({ lat: a.lat, lon: a.lon, approx: false }, state.profile);
+}
+
+const fmtKm = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
+const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
+
+function renderMap() {
+  const wrap = h('div', { class: 'map-screen' });
+  const top = h('div', { class: 'map-top' });
+  const fabs = h('div', { class: 'map-fabs' });
+  wrap.append(top, fabs);
+
+  const paint = (nav) => {
+    const a = state.addresses.find((x) => x.id === state.routeTo);
+    const banners = [];
+    if (nav.picking) {
+      banners.push(h('div', { class: 'map-banner info' }, '👆 Нажми на карте, где вход',
+        h('button', { class: 'btn btn-ghost banner-btn', onclick: () => mapView.cancelPick() }, 'Отмена')));
+    }
+    if (nav.inPedZone) banners.push(h('div', { class: 'map-banner warn' }, '🚶 Пешеходная зона — веди велосипед рядом'));
+    if (nav.gps === 'denied') banners.push(h('div', { class: 'map-banner warn' }, 'GPS запрещён. Разреши геолокацию для этого сайта в настройках Chrome.'));
+
+    let card;
+    if (!a) {
+      card = h('div', { class: 'map-card' },
+        h('div', { class: 'muted' }, 'Маршрут не выбран'),
+        h('button', { class: 'btn btn-wide', onclick: () => go('addresses') }, 'Выбрать адрес'));
+    } else {
+      let status = '';
+      if (nav.routeState === 'loading') status = 'Строю маршрут…';
+      else if (nav.routeState === 'ok' && nav.route) status = `${fmtKm(nav.route.length)} · ${fmtMin(nav.route.time)}` + (nav.route.fromHub ? ' · от хаба (нет GPS)' : '');
+      else if (nav.routeState === 'offline') status = 'Нет интернета — маршрут не построить, точка на карте';
+      else if (nav.routeState === 'error') status = 'Маршрут не построился — попробуй ↻';
+      card = h('div', { class: 'map-card' },
+        h('div', { class: 'map-card-row' },
+          h('button', { class: 'map-dest', onclick: () => openAddress(a.id) },
+            h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
+            h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)),
+          h('button', { class: 'btn btn-icon btn-ghost', 'aria-label': 'Убрать маршрут', onclick: () => {
+            state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); paint(mapView.nav);
+          } }, '✕')),
+        status ? h('div', { class: 'map-status' }, status) : null,
+        a.intercom || a.floor || a.entrance ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
+        a.geoApprox ? h('div', { class: 'map-approx' }, `⚠️ Точка примерная (${a.geoNote}). Нажми 📌 и поставь вход.`) : null,
+        h('div', { class: 'map-card-row' },
+          h('div', { class: 'segmented small-seg' }, mapView.PROFILES.map((p) => h('button', {
+            class: 'seg' + (state.profile === p.id ? ' on' : ''),
+            onclick: () => { state.profile = p.id; store.set('profile', p.id); showRoute(a); },
+          }, p.label))),
+          h('button', { class: 'btn btn-icon', 'aria-label': 'Перестроить маршрут', onclick: () => showRoute(a) }, '↻')),
+      );
+    }
+    top.replaceChildren(card, ...banners);
+
+    fabs.replaceChildren(...[
+      a ? h('button', { class: 'fab' + (nav.picking ? ' on' : ''), 'aria-label': 'Поставить точку входа', onclick: () => (nav.picking ? mapView.cancelPick() : setEntrance(a)) }, '📌') : null,
+      a && nav.dest ? h('button', { class: 'fab', 'aria-label': 'Показать весь маршрут', onclick: () => mapView.fitRoute() }, '⤢') : null,
+      h('button', { class: 'fab' + (nav.follow ? ' on' : ''), 'aria-label': 'Моё местоположение', onclick: () => mapView.followMe() }, '◎'),
+    ].filter(Boolean));
+
+  };
+
+  mapView.onChange(paint);
+  paint(mapView.nav);
+
+  mapView.getMapElement().then((el) => {
+    wrap.prepend(el);
+    mapView.resize();
+    // Маршрут выбран раньше (например, до перезапуска приложения), но ещё не построен.
+    const a = state.addresses.find((x) => x.id === state.routeTo);
+    if (a && !mapView.nav.dest && mapView.nav.routeState === 'idle') showRoute(a);
+  }).catch(() => {
+    top.replaceChildren(h('div', { class: 'map-card' }, 'Карта не загрузилась. Проверь интернет и открой вкладку снова.'));
+  });
+  return wrap;
+}
+
 // ---------- Экран «Адреса» ----------
+
 
 const MARKS = [
   { id: 'green', label: 'Простой' },
@@ -231,6 +352,7 @@ async function createAddress(parsed) {
   await saveAddress(a);
   state.query = '';
   openAddress(a.id);
+  ensureCoords(a).catch(() => {});
 }
 
 // Карточка адреса — полноэкранный лист поверх вкладок.
@@ -264,18 +386,21 @@ async function openAddress(id) {
     return box;
   };
 
-  const q = encodeURIComponent(geoQuery(a));
+  // Если координаты известны (особенно поставленная вручную точка входа) — передаём их, иначе текст адреса.
+  const geoPath = a.lat ? `${a.lat},${a.lon}?q=${a.lat},${a.lon}` : `0,0?q=${encodeURIComponent(geoQuery(a))}`;
   // Android intent-ссылка: открывает geo:-адрес в конкретном приложении,
   // а если его нет — Chrome сам ведёт на страницу установки в Google Play.
-  const inApp = (pkg) => `intent:0,0?q=${q}#Intent;scheme=geo;package=${pkg};end`;
+  const inApp = (pkg) => `intent:${geoPath}#Intent;scheme=geo;package=${pkg};end`;
 
   openSheet(`${a.street} ${a.house}`, h('div', { class: 'screen' },
     h('p', { class: 'muted' }, [a.zip, a.city].filter(Boolean).join(' ')),
+    h('button', { class: 'btn btn-primary btn-wide', onclick: () => { closeSheet(); showRoute(a); } }, '🗺️ Маршрут на карте'),
+    a.geoNote ? h('p', { class: 'hint' }, (a.geoApprox ? '⚠️ Точка примерная: ' : '📍 ') + a.geoNote) : null,
+    h('div', { class: 'field-label' }, 'Открыть в другом приложении'),
     h('div', { class: 'row' },
-      h('a', { class: 'btn btn-primary btn-big', href: inApp('app.organicmaps') }, 'Organic Maps'),
-      h('a', { class: 'btn btn-primary btn-big', href: inApp('net.osmand') }, 'OsmAnd')),
-    h('a', { class: 'btn btn-wide', href: `geo:0,0?q=${q}` }, 'Другое приложение карт'),
-    h('p', { class: 'hint' }, 'Если приложение не установлено — откроется Google Play.'),
+      h('a', { class: 'btn btn-big btn-small-text', href: inApp('app.organicmaps') }, 'Organic Maps'),
+      h('a', { class: 'btn btn-big btn-small-text', href: inApp('net.osmand') }, 'OsmAnd'),
+      h('a', { class: 'btn btn-big btn-small-text', href: `geo:${geoPath}` }, 'Другое')),
     h('div', { class: 'field-label' }, 'Метка'),
     segmented('mark', MARKS.map((m) => ({ ...m, cls: 'seg-' + m.id }))),
     field('intercom', 'Код домофона', { big: true, inputmode: 'text', placeholder: '—' }),
@@ -568,7 +693,9 @@ function openSettings() {
   openSheet('Данные и настройки', h('div', { class: 'screen' },
     h('div', { class: 'info-box' },
       h('strong', {}, `Адресов в базе: ${state.addresses.length}`),
-      h('p', {}, 'Все данные хранятся только на этом телефоне. Приложение ничего не отправляет в интернет.'),
+      h('p', {}, 'Адреса, коды и заметки хранятся только на этом телефоне и никуда не отправляются.'),
+      h('p', {}, 'Для карты в интернет уходят только: запросы кусочков карты (OpenFreeMap) и координаты начала и конца маршрута (BRouter) — без адреса и заметок. Поиск адреса работает на телефоне.'),
+
     ),
     h('h2', { class: 'section-title' }, 'Резервная копия'),
     h('button', { class: 'btn btn-wide', onclick: () => {

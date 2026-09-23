@@ -1,6 +1,11 @@
-﻿// Service worker: кэширует приложение, чтобы оно работало без интернета.
-// При изменении любого файла — увеличить версию, иначе телефон покажет старую.
-const CACHE = 'flink-helper-v2';
+// Service worker: офлайн-работа приложения и кэш просмотренных кусочков карты.
+//
+// Файлы приложения — «сначала сеть»: при интернете всегда свежая версия,
+// без интернета — сохранённая копия. Версию CACHE менять при изменении списка FILES.
+const CACHE = 'flink-helper-v3';
+const TILES = 'flink-helper-tiles';
+const MAX_TILES = 4000;
+const NETWORK_TIMEOUT = 3000;
 
 const FILES = [
   './',
@@ -10,6 +15,14 @@ const FILES = [
   './js/db.js',
   './js/address.js',
   './js/data.js',
+  './js/geocode.js',
+  './js/map.js',
+  './js/map-style.js',
+  './vendor/maplibre-gl.mjs',
+  './vendor/maplibre-gl-shared.mjs',
+  './vendor/maplibre-gl-worker.mjs',
+  './vendor/maplibre-gl.css',
+  './data/addresses-dresden.json',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',
@@ -23,19 +36,59 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== TILES).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
 
-// Сначала кэш, потом сеть. Чужие адреса не трогаем.
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  event.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req).catch(() => {
-      if (req.mode === 'navigate') return caches.match('./index.html');
-      return Response.error();
-    })),
-  );
+  if (req.method !== 'GET') return;
+  const url = new URL(req.url);
+
+  if (url.origin === self.location.origin) {
+    event.respondWith(networkFirst(req));
+  } else if (url.hostname === 'tiles.openfreemap.org') {
+    // Тайлы и шрифты с версией в адресе не меняются — сначала кэш.
+    // Описание источника (/planet) меняется при обновлении карты — сначала сеть.
+    event.respondWith(url.pathname === '/planet' ? networkFirst(req, TILES) : cacheFirst(req));
+  }
+  // Остальное (маршруты BRouter) — напрямую в сеть, не кэшируем.
 });
+
+async function networkFirst(req, cacheName = CACHE) {
+  const cache = await caches.open(cacheName);
+  const net = fetch(req).then((res) => {
+    if (res.ok) cache.put(req, res.clone());
+    return res;
+  });
+  // Сеть медленная — отдаём кэш; кэша нет — продолжаем ждать сеть.
+  const fast = await Promise.race([net.catch(() => null), new Promise((r) => setTimeout(r, NETWORK_TIMEOUT, null))]);
+  if (fast) return fast;
+  const hit = await cache.match(req, { ignoreSearch: true });
+  if (hit) return hit;
+  try {
+    return await net;
+  } catch {
+    if (req.mode === 'navigate') return (await cache.match('./index.html')) || Response.error();
+    return Response.error();
+  }
+}
+
+async function cacheFirst(req) {
+  const cache = await caches.open(TILES);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  const res = await fetch(req);
+  if (res.ok) {
+    await cache.put(req, res.clone());
+    if (Math.random() < 0.02) trim(cache);
+  }
+  return res;
+}
+
+// Не даём кэшу карты расти бесконечно: удаляем самые старые записи.
+async function trim(cache) {
+  const keys = await cache.keys();
+  for (const k of keys.slice(0, Math.max(0, keys.length - MAX_TILES))) await cache.delete(k);
+}
