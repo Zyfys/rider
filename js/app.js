@@ -280,7 +280,8 @@ function turnPanel(nav) {
   return h('div', { class: 'turn' + (m.dist < 30 ? ' now' : '') },
     icon,
     h('div', { class: 'turn-text' },
-      m.arrive && m.dist < 25 ? null : h('div', { class: 'turn-dist' }, fmtKm(m.dist)),
+      (m.arrive && m.dist < 25) || m.dist < 10 ? null : h('div', { class: 'turn-dist' }, fmtKm(m.dist)),
+
       h('div', { class: 'turn-label' }, label[0].toUpperCase() + label.slice(1))));
 }
 
@@ -311,8 +312,9 @@ function renderMap() {
     let card;
     if (!a && !isHub) {
       card = h('div', { class: 'map-card' },
-        h('div', { class: 'muted' }, 'Маршрут не выбран'),
-        h('button', { class: 'btn btn-wide', onclick: () => go('addresses') }, 'Выбрать адрес'));
+        h('div', { class: 'map-card-row' },
+          h('span', { class: 'muted', style: 'flex:1' }, 'Маршрут не выбран'),
+          h('button', { class: 'btn', onclick: () => go('addresses') }, 'Адреса')));
     } else {
       let status = '';
       if (nav.routeState === 'loading') status = 'Строю маршрут…';
@@ -331,8 +333,9 @@ function renderMap() {
           } }, '✕')),
         status ? h('div', { class: 'map-status' }, status) : null,
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
-        a?.geoApprox ? h('div', { class: 'map-approx' }, `⚠️ Точка примерная (${a.geoNote}). Нажми 📌 и поставь вход.`) : null,
-        isHub && !hubSet ? h('div', { class: 'map-approx' }, '⚠️ Точка хаба примерная. Когда будешь у входа в хаб — нажми 📌 и поставь её.') : null,
+        a?.geoApprox ? h('div', { class: 'map-approx' }, '⚠️ Точка примерная — поставь вход 📌') : null,
+        isHub && !hubSet ? h('div', { class: 'map-approx' }, '⚠️ Точка хаба примерная — поставь её 📌 у входа') : null,
+
         // Во время езды (карта следует за мной) карточка компактная, чтобы не закрывать карту.
         nav.follow && nav.routeState === 'ok' ? null : h('div', { class: 'map-card-row' },
           h('div', { class: 'segmented small-seg' }, mapView.PROFILES.map((p) => h('button', {

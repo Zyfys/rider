@@ -16,8 +16,8 @@
   --overlay-2: rgba(34, 38, 45, .95);
   --radius: 14px;
   --tap: 56px;
-  --nav-h: 72px;
-  --top-h: 60px;
+  --nav-h: 58px;
+  --top-h: 48px;
   color-scheme: dark;
 }
 
@@ -69,9 +69,9 @@ button, input, textarea { font: inherit; color: inherit; }
   background: var(--bg);
   border-bottom: 1px solid var(--line);
 }
-.topbar h1 { flex: 1; margin: 0; font-size: 22px; font-weight: 700; }
-.topbar-btn { min-height: 44px; padding: 0 14px; font-size: 16px; }
-.theme-btn { min-width: 48px; padding: 0; font-size: 22px; }
+.topbar h1 { flex: 1; margin: 0; font-size: 19px; font-weight: 700; }
+.topbar .topbar-btn { min-height: 38px; min-width: 42px; padding: 0 10px; font-size: 18px; border-color: transparent; }
+.topbar .theme-btn { padding: 0; }
 
 
 /* ---------- Основная область и навигация ---------- */
@@ -109,11 +109,11 @@ main {
   border: 0;
   background: none;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   cursor: pointer;
 }
 
-.nav-icon { font-size: 24px; line-height: 1; filter: grayscale(1) opacity(.7); }
+.nav-icon { font-size: 20px; line-height: 1; filter: grayscale(1) opacity(.7); }
 .nav-btn.active { color: var(--text); box-shadow: inset 0 3px 0 var(--accent); }
 .nav-btn.active .nav-icon { filter: none; }
 
@@ -329,35 +329,35 @@ main.is-map { position: relative; overflow: hidden; }
 .map { position: absolute; inset: 0; background: var(--bg); }
 .map-top {
   position: absolute;
-  top: 10px; left: 10px; right: 10px;
+  top: 8px; left: 8px; right: 8px;
   z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   pointer-events: none;
 }
 .map-top > * { pointer-events: auto; }
 .turn {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 10px 16px 10px 10px;
+  gap: 10px;
+  padding: 6px 12px 6px 6px;
   border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-ink);
   box-shadow: 0 4px 16px rgba(0, 0, 0, .3);
 }
 .turn.now { background: var(--green); color: #05170d; }
-.turn-icon { flex: none; width: 76px; height: 76px; }
-.turn-text { display: flex; flex-direction: column; min-width: 0; }
-.turn-dist { font-size: 34px; font-weight: 800; line-height: 1.1; }
-.turn-label { font-size: 20px; font-weight: 700; }
+.turn-icon { flex: none; width: 48px; height: 48px; }
+.turn-text { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.turn-dist { font-size: 24px; font-weight: 800; line-height: 1.1; white-space: nowrap; }
+.turn-label { font-size: 16px; font-weight: 700; }
 .map-card {
-
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
+  gap: 2px;
+  padding: 6px 8px 6px 12px;
+  font-size: 15px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--overlay);
@@ -368,61 +368,68 @@ main.is-map { position: relative; overflow: hidden; }
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
-  min-height: 48px;
+  min-height: 36px;
   padding: 0;
   border: 0;
   background: none;
   text-align: left;
   cursor: pointer;
 }
-.map-dest .addr-main { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.map-status { font-size: 18px; font-weight: 700; color: var(--accent); }
-.map-approx { font-size: 15px; color: var(--warn-text); }
-.small-seg { flex: 1; }
-.small-seg .seg { min-height: 44px; font-size: 16px; }
+.map-dest .addr-main { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-dest .mark { width: 12px; height: 12px; }
+.map-card .btn-icon { min-width: 36px; min-height: 36px; font-size: 16px; border-radius: 10px; }
+.map-card .btn { min-height: 36px; font-size: 15px; padding: 0 12px; }
+.map-card .addr-hint { font-size: 13px; }
+.map-status { font-size: 15px; font-weight: 700; color: var(--accent); }
+.map-approx { font-size: 13px; color: var(--warn-text); }
+.small-seg { flex: 1; padding: 2px; }
+.small-seg .seg { min-height: 32px; font-size: 14px; border-radius: 10px; }
 .map-banner {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: var(--radius);
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 14px;
   font-weight: 700;
 }
 .map-banner.warn { background: var(--red); color: #1a0505; }
 .map-banner.info { background: var(--accent); color: var(--accent-ink); }
-.banner-btn { min-height: 40px; margin-left: auto; border-color: currentColor; color: inherit; }
+.banner-btn { min-height: 32px; padding: 0 10px; font-size: 14px; margin-left: auto; border-color: currentColor; color: inherit; }
 .map-fabs {
   position: absolute;
-  right: 12px; bottom: 36px;
+  right: 10px; bottom: 28px;
   z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 .fab {
-  width: 60px; height: 60px;
+  width: 44px; height: 44px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 50%;
   background: var(--overlay-2);
   color: var(--text);
-  font-size: 26px;
+  font-size: 19px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
   cursor: pointer;
 }
 .fab.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .hub-btn {
   position: absolute;
-  left: 12px; bottom: 36px;
+  left: 10px; bottom: 28px;
   z-index: 3;
-  min-height: 60px;
-  padding: 0 22px;
+  min-height: 44px;
+  padding: 0 16px;
   border: 0;
   border-radius: 999px;
   background: var(--green);
   color: #05170d;
-  font-size: 20px;
+  font-size: 16px;
+
   font-weight: 800;
   box-shadow: 0 4px 12px rgba(0, 0, 0, .45);
   cursor: pointer;
