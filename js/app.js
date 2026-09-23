@@ -264,12 +264,18 @@ async function openAddress(id) {
     return box;
   };
 
-  const geo = 'geo:0,0?q=' + encodeURIComponent(geoQuery(a));
+  const q = encodeURIComponent(geoQuery(a));
+  // Android intent-ссылка: открывает geo:-адрес в конкретном приложении,
+  // а если его нет — Chrome сам ведёт на страницу установки в Google Play.
+  const inApp = (pkg) => `intent:0,0?q=${q}#Intent;scheme=geo;package=${pkg};end`;
 
   openSheet(`${a.street} ${a.house}`, h('div', { class: 'screen' },
     h('p', { class: 'muted' }, [a.zip, a.city].filter(Boolean).join(' ')),
-    h('a', { class: 'btn btn-primary btn-wide', href: geo }, '🧭 Открыть в навигаторе'),
-    h('p', { class: 'hint' }, 'Откроется выбор: OsmAnd, Organic Maps и т.п.'),
+    h('div', { class: 'row' },
+      h('a', { class: 'btn btn-primary btn-big', href: inApp('app.organicmaps') }, 'Organic Maps'),
+      h('a', { class: 'btn btn-primary btn-big', href: inApp('net.osmand') }, 'OsmAnd')),
+    h('a', { class: 'btn btn-wide', href: `geo:0,0?q=${q}` }, 'Другое приложение карт'),
+    h('p', { class: 'hint' }, 'Если приложение не установлено — откроется Google Play.'),
     h('div', { class: 'field-label' }, 'Метка'),
     segmented('mark', MARKS.map((m) => ({ ...m, cls: 'seg-' + m.id }))),
     field('intercom', 'Код домофона', { big: true, inputmode: 'text', placeholder: '—' }),
