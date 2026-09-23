@@ -111,7 +111,6 @@ export function step(g, p) {
   g.offCount = off > 45 ? g.offCount + 1 : 0;
   if (g.offCount) return { say: [], offRoute: g.offCount >= 2, next: null };
 
-
   const say = [];
   // Пропускаем уже проеханные повороты.
   while (g.next < g.items.length && g.items[g.next].at < s - 15) { g.next++; g.pre = false; }
@@ -136,7 +135,6 @@ export function step(g, p) {
   }
   return { say, offRoute: false, next: upcoming(g, s) };
 }
-
 
 export function summary(lengthM, timeS) {
   const min = Math.max(1, Math.round(timeS / 60));

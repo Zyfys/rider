@@ -6,7 +6,7 @@ import * as mapView from './map.js';
 import { summary } from './guidance.js';
 import { arrowSvg } from './arrows.js';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -294,7 +294,9 @@ function renderMap() {
   const top = h('div', { class: 'map-top' });
   const fabs = h('div', { class: 'map-fabs' });
   const hubBtn = h('button', { class: 'hub-btn', onclick: showHub }, '🏠 В хаб');
-  wrap.append(top, fabs, hubBtn);
+  const speedEl = h('div', { class: 'speed', hidden: true, 'aria-label': 'Скорость' });
+  wrap.append(top, fabs, hubBtn, speedEl);
+
 
   const paint = (nav) => {
     const isHub = state.routeTo === HUB_ID;
@@ -349,6 +351,8 @@ function renderMap() {
     top.replaceChildren(...[turnPanel(nav), card, ...banners].filter(Boolean));
 
     hubBtn.hidden = isHub || nav.picking;
+    speedEl.hidden = nav.speed == null;
+    if (nav.speed != null) speedEl.replaceChildren(h('b', {}, String(Math.round(nav.speed))), h('span', {}, 'км/ч'));
     fabs.replaceChildren(...[
       a || isHub ? h('button', { class: 'fab' + (nav.picking ? ' on' : ''), 'aria-label': isHub ? 'Поставить точку хаба' : 'Поставить точку входа',
         onclick: () => (nav.picking ? mapView.cancelPick() : isHub ? setHubPoint() : setEntrance(a)) }, '📌') : null,

@@ -2,7 +2,7 @@
 // Сознательно без пошаговых команд и автоперестроения: линия маршрута + своя точка.
 import { buildStyle, addOverlayLayers, applyTheme } from './map-style.js';
 import { HUB } from './geocode.js';
-import { buildGuide, step, upcoming } from './guidance.js';
+import { buildGuide, step, upcoming, distance } from './guidance.js';
 
 export const PROFILES = [
   { id: 'fastbike', label: 'Быстрый' },
@@ -20,7 +20,26 @@ export const nav = {
   routeState: 'idle', // idle | loading | ok | offline | error
   picking: false,
   next: null,         // следующий манёвр для панели со стрелкой (см. upcoming в guidance.js)
+  speed: null,        // км/ч
 };
+
+// Скорость: из GPS, а если телефон её не даёт — по двум последним точкам. Сглаживаем, чтобы цифра не прыгала.
+let lastFix = null;
+function updateSpeed(p) {
+  let ms = p.coords.speed;
+  if (ms == null || Number.isNaN(ms) || ms < 0) {
+    ms = null;
+    if (lastFix) {
+      const dt = (p.timestamp - lastFix.t) / 1000;
+      if (dt > 0.5 && dt < 15) ms = distance([lastFix.lon, lastFix.lat], [p.coords.longitude, p.coords.latitude]) / dt;
+    }
+  }
+  lastFix = { lat: p.coords.latitude, lon: p.coords.longitude, t: p.timestamp };
+  if (ms == null) return;
+  const kmh = Math.min(ms * 3.6, 80);
+  nav.speed = nav.speed == null ? kmh : nav.speed * 0.5 + kmh * 0.5;
+  if (nav.speed < 1.5) nav.speed = 0;
+}
 
 let map = null;
 let el = null;
@@ -79,7 +98,6 @@ export async function setTheme(t) {
 }
 
 export function resize() {
-
   map?.resize();
 }
 
@@ -90,6 +108,7 @@ function startGps() {
   navigator.geolocation.watchPosition(async (p) => {
     const first = !nav.me;
     nav.me = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy };
+    updateSpeed(p);
     nav.gps = 'ok';
     await loaded;
     map.getSource('me').setData(fc([point(nav.me.lon, nav.me.lat)]));
@@ -179,8 +198,6 @@ export async function clearRoute() {
   guide = null;
   nav.next = null;
   emit();
-
-
 }
 
 export function fitRoute() {
