@@ -3,7 +3,7 @@
 import { norm } from './address.js';
 
 // Хаб Prager Straße — точка старта, если GPS нет, и ориентир для выбора одноимённых улиц.
-export const HUB = { lat: 51.0452, lon: 13.7370 };
+export const HUB = { lat: 51.04339, lon: 13.73558 }; // Prager Straße 4a
 
 // data: { "Улица|Индекс": [["12a", lat, lon], ...] } → Map(normStreet → [{ zip, houses: Map(normHouse → [lat, lon, house]) }])
 export function buildIndex(data) {

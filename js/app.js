@@ -7,7 +7,7 @@ import { summary, plural, distance } from './guidance.js';
 import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.10.1';
 
 // ---------- Мелкие помощники ----------
 
@@ -225,7 +225,7 @@ async function setEntrance(a) {
 
 // ---------- Хаб ----------
 
-// Точка хаба: по умолчанию примерная (Prager Straße), пользователь уточняет её кнопкой 📌 у входа.
+// Точка хаба: по умолчанию адрес Prager Straße 4a; кнопкой 📌 её можно передвинуть точно на вход.
 // HUB — общий объект, его же карта использует как старт, если нет GPS.
 Object.assign(HUB, store.get('hub', {}));
 const HUB_ID = 'hub';
@@ -236,7 +236,7 @@ async function showHub(opts = {}) {
   store.set('routeTo', HUB_ID);
   if (state.tab !== 'map') go('map');
   await mapView.getMapElement();
-  mapView.routeTo({ lat: HUB.lat, lon: HUB.lon, approx: !store.get('hub', null) }, state.profile);
+  mapView.routeTo({ lat: HUB.lat, lon: HUB.lon, approx: false }, state.profile);
 }
 
 async function setHubPoint() {
@@ -388,7 +388,6 @@ function renderMap() {
 
   const paint = (nav) => {
     const isHub = state.routeTo === HUB_ID;
-    const hubSet = !!store.get('hub', null);
     const a = isHub ? null : state.addresses.find((x) => x.id === state.routeTo);
     const reroute = () => (isHub ? showHub() : showRoute(a));
     const banners = [];
@@ -424,7 +423,6 @@ function renderMap() {
         status ? h('div', { class: 'map-status' }, status) : null,
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
         a?.geoApprox ? h('div', { class: 'map-approx' }, '⚠️ Точка примерная — поставь вход 📌') : null,
-        isHub && !hubSet ? h('div', { class: 'map-approx' }, '⚠️ Точка хаба примерная — поставь её 📌 у входа') : null,
 
         // Во время езды (карта следует за мной) карточка компактная, чтобы не закрывать карту.
         nav.follow && nav.routeState === 'ok' ? null : h('div', { class: 'map-card-row' },
