@@ -5,3 +5,6 @@ flink-dresden-app-plan.md
 flink-helper-backup-*.json
 
 node_modules/
+
+# Личные карты и кэш маршрутов (адреса клиентов) — tools/build-private-map.mjs
+private/
