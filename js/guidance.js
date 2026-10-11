@@ -29,7 +29,6 @@ export function phrase(cmd, exit, angle) {
   return null;
 }
 
-const cap = (s) => s[0].toUpperCase() + s.slice(1);
 
 export function plural(n, one, few, many) {
   const m10 = n % 10;
@@ -101,15 +100,27 @@ export function locate(g, p) {
   return best;
 }
 
-// Один шаг по новой GPS-точке. Возвращает { say: [фразы], offRoute }.
-export function step(g, p) {
+// За сколько метров до поворота говорить «Сейчас …»: примерно за 2,5 секунды езды.
+// Раньше было фиксированно 30 м — на велосипеде это слишком рано, можно свернуть не в тот поворот.
+export function nowDistance(speed) {
+  const v = speed > 0 ? speed : 4.5; // м/с; если скорость неизвестна — ~16 км/ч
+  return Math.max(12, Math.min(22, v * 2.5 + 6));
+}
+
+// Предупреждение «Через N метров …» — не дальше этого расстояния, чтобы между ним и поворотом
+// не успевал попасться лишний перекрёсток.
+const PRE_DISTANCE = 100;
+
+// Один шаг по новой GPS-точке (speed — м/с, может быть null).
+// Возвращает { say: [фразы], offRoute, next, s — пройдено метров по маршруту }.
+export function step(g, p, speed = null) {
   // Уже на месте — дальше молчим и не перестраиваем, даже если отошли от точки.
-  if (g.arrived) return { say: [], offRoute: false, next: upcoming(g) };
+  if (g.arrived) return { say: [], offRoute: false, next: upcoming(g), s: g.total };
   const { s, off } = locate(g, p);
   // Далеко от линии — ничего не объявляем (иначе GPS-скачок дал бы ложное «Вы на месте»).
   // Две такие точки подряд — сход с маршрута.
   g.offCount = off > 45 ? g.offCount + 1 : 0;
-  if (g.offCount) return { say: [], offRoute: g.offCount >= 2, next: null };
+  if (g.offCount) return { say: [], offRoute: g.offCount >= 2, next: null, s: null };
 
   const say = [];
   // Пропускаем уже проеханные повороты.
@@ -117,15 +128,17 @@ export function step(g, p) {
   const it = g.items[g.next];
   if (it) {
     const d = it.at - s;
-    if (d <= 30) {
-      let text = cap(it.text);
+    const nowAt = nowDistance(speed);
+    if (d <= nowAt) {
+      let text = `Сейчас ${it.text}`;
       const after = g.items[g.next + 1];
       if (after && after.at - it.at < 40) { text += `, затем ${after.text}`; g.next++; }
       say.push(text);
       g.next++;
       g.pre = false;
-    } else if (!g.pre && d <= 160) {
-      if (d >= 60) say.push(`Через ${Math.round(d / 50) * 50} метров ${it.text}`);
+    } else if (!g.pre && d <= PRE_DISTANCE) {
+      // Слишком близко к самой команде — предупреждение только мешает.
+      if (d >= nowAt + 30) say.push(`Через ${Math.round(d / 10) * 10} метров ${it.text}`);
       g.pre = true;
     }
   }
@@ -133,7 +146,7 @@ export function step(g, p) {
     g.arrived = true;
     say.push('Вы на месте');
   }
-  return { say, offRoute: false, next: upcoming(g, s) };
+  return { say, offRoute: false, next: upcoming(g, s), s };
 }
 
 export function summary(lengthM, timeS) {

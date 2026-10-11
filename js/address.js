@@ -1,11 +1,12 @@
 ﻿// Разбор адреса, вставленного из приложения Flink, и нормализация для поиска.
 
-// Приводит строку к виду для сравнения: «Wilsdruffer Straße» == «wilsdruffer str.» == «Wilsdruffer Strasse».
+// Приводит строку к виду для сравнения: «Wilsdruffer Straße» == «wilsdruffer str.» == «Wilsdruffer Strasse»,
+// «Fetscherplatz» == «Fetscherpl.».
 export function norm(s, collapseStreet = true) {
   const t = (s || '')
     .toLowerCase()
     .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss');
-  return (collapseStreet ? t.replace(/strasse\b|str\b\.?/g, 'str') : t).replace(/[^a-z0-9а-яё]/g, '');
+  return (collapseStreet ? t.replace(/strasse\b|str\b\.?/g, 'str').replace(/platz\b|pl\b\.?/g, 'pl') : t).replace(/[^a-z0-9а-яё]/g, '');
 }
 
 export function addressKey(street, house) {
@@ -15,6 +16,16 @@ export function addressKey(street, house) {
 const HOUSE = String.raw`\d+\s*[a-zA-Z]?(?:\s*[-–/]\s*\d+\s*[a-zA-Z]?)?`;
 const STREET_HOUSE = new RegExp(String.raw`^(.*?\D)\s*(${HOUSE})$`);
 const ZIP_CITY = /\b(\d{5})\s*([A-Za-zÄÖÜäöüß .-]*)/;
+// Номер квартиры после дома: «Grunaer Straße 12 Apt 034», «… Whg. 12».
+const APARTMENT = /\s+((?:apt|app|apartment|appartement|whg|wohnung|we|zi|zimmer)\b\.?\s*\S+)$/i;
+// Город/земля/страна, которые Flink дописывает после индекса («…, 01069 Dresden, Dresden») — в заметки не нужны.
+const NOISE = new Set(['dresden', 'дрезден', '드레스덴', 'sachsen', 'saxony', 'саксония', 'deutschland', 'germany', 'германия']);
+
+// Текст состоит только из названий города/земли/страны (через запятую) — в заметке он не нужен.
+export function isNoise(text, city = '') {
+  const parts = (text || '').split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => NOISE.has(p) || p === city.toLowerCase());
+}
 
 // Возвращает { street, house, zip, city, extra } — пустые строки, если чего-то нет.
 export function parseAddress(text) {
@@ -32,8 +43,13 @@ export function parseAddress(text) {
 
   const parts = rest.split(',').map((p) => p.trim()).filter(Boolean);
   const extras = [];
-  for (const p of parts) {
+  for (let p of parts) {
     if (!out.street) {
+      const apt = p.match(APARTMENT);
+      if (apt && STREET_HOUSE.test(p.slice(0, apt.index))) {
+        extras.push(apt[1]);
+        p = p.slice(0, apt.index);
+      }
       const m = p.match(STREET_HOUSE);
       if (m && /[A-Za-zÄÖÜäöüß]/.test(m[1])) {
         out.street = m[1].trim().replace(/[,.]$/, '');
@@ -41,7 +57,7 @@ export function parseAddress(text) {
         continue;
       }
     }
-    if (p.toLowerCase() !== 'deutschland' && p.toLowerCase() !== 'germany') extras.push(p);
+    if (!isNoise(p, out.city)) extras.push(p);
   }
   if (!out.street && extras.length) out.street = extras.shift();
   out.extra = extras.join(', ');

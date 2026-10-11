@@ -42,7 +42,8 @@ test('riding the whole route announces every turn once, in order, and arrival', 
   const nowPhrases = said.filter((s) => !s.startsWith('Через') && s !== 'Вы на месте');
   const expected = g.items.map((i) => i.text);
   // Каждый поворот произнесён (часть — склеена «, затем …»)
-  const spoken = nowPhrases.flatMap((s) => s.toLowerCase().split(', затем '));
+  assert.ok(nowPhrases.every((s) => s.startsWith('Сейчас ')), 'turn commands start with «Сейчас»');
+  const spoken = nowPhrases.flatMap((s) => s.replace(/^Сейчас /, '').split(', затем '));
   assert.deepEqual(spoken, expected);
   assert.equal(said.filter((s) => s === 'Вы на месте').length, 1);
   assert.equal(said.at(-1), 'Вы на месте');
@@ -72,8 +73,8 @@ test('after arrival: silent, no reroute', () => {
   step(g, coords[coords.length - 1]);
   assert.equal(g.arrived, true);
   const far = [coords[0][0] + 0.01, coords[0][1]];
-  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 } });
-  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 } });
+  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 }, s: g.total });
+  assert.deepEqual(step(g, far), { say: [], offRoute: false, next: { arrive: true, dist: 0 }, s: g.total });
 });
 
 test('GPS jump far away near the route end does not trigger "Вы на месте"', () => {
@@ -103,4 +104,34 @@ test('upcoming maneuver for the arrow panel counts down and ends with arrival', 
   }
   assert.equal(seen.at(-1), 'arrive');
   assert.ok(seen.length >= 10, 'panel walks through the turns: ' + seen.join(','));
+});
+
+test('turn command comes right before the turn, not 30 m early', async () => {
+  const { nowDistance } = await import('../js/guidance.js');
+  assert.equal(nowDistance(1), 12);            // медленно — за 12 м
+  assert.ok(Math.abs(nowDistance(5.5) - 19.75) < 0.01); // 20 км/ч — ~20 м
+  assert.equal(nowDistance(12), 22);           // быстро — не дальше 22 м
+  // На реальном маршруте: в момент команды до поворота не больше 22 м, предупреждение — не дальше 100 м.
+  const g = buildGuide(coords, hints);
+  const turnsAt = g.items.map((i) => i.at);
+  let travelled = 0, prev = coords[0];
+  for (const p of ride(coords, 4)) {
+    travelled += distance(prev, p); prev = p;
+    const nextTurn = turnsAt.find((at) => at >= travelled - 6);
+    for (const phrase of step(g, p, 5.5).say) {
+      if (phrase.startsWith('Сейчас')) assert.ok(nextTurn - travelled <= 22, `${phrase}: ${Math.round(nextTurn - travelled)} м до поворота`);
+      if (phrase.startsWith('Через')) assert.ok(nextTurn - travelled <= 101, `${phrase}: слишком рано`);
+    }
+  }
+});
+
+test('progress along the route grows from 0 to total', () => {
+  const g = buildGuide(coords, hints);
+  let last = -1;
+  for (const p of ride(coords)) {
+    const { s } = step(g, p);
+    assert.ok(s >= last - 1, 'progress never jumps back');
+    last = s;
+  }
+  assert.ok(Math.abs(last - g.total) < 1);
 });

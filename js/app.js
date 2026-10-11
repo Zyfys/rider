@@ -1,12 +1,13 @@
 ﻿import * as db from './db.js';
-import { parseAddress, addressKey, formatAddress, geoQuery, matches } from './address.js';
+import { parseAddress, addressKey, formatAddress, geoQuery, matches, isNoise } from './address.js';
 import { PHRASES, CALL_SAY, CALL_HEARD, CHECKLIST, RULES } from './data.js';
 import { geocode, HUB } from './geocode.js';
 import * as mapView from './map.js';
-import { summary } from './guidance.js';
+import { summary, plural, distance } from './guidance.js';
 import { arrowSvg } from './arrows.js';
+import { computeStats } from './stats.js';
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -108,6 +109,7 @@ const state = {
   tab: store.get('tab', 'map'),
   query: '',
   addresses: [],
+  trips: [],
   currentId: store.get('currentId', null),
   phraseGroup: store.get('phraseGroup', PHRASES[0].id),
   callMode: 'say',
@@ -120,6 +122,10 @@ const state = {
 
 async function loadAddresses() {
   state.addresses = await db.getAll();
+}
+
+async function loadTrips() {
+  state.trips = (await db.trips.getAll()).sort((a, b) => a.ts - b.ts);
 }
 
 function currentAddress() {
@@ -186,7 +192,10 @@ async function ensureCoords(a) {
   return a;
 }
 
-async function showRoute(a) {
+// opts.log — поездку начал сам пользователь (кнопкой), её надо записать в журнал.
+// Перестроения и восстановление маршрута после перезапуска вызываются без log.
+async function showRoute(a, opts = {}) {
+  pendingTrip = opts.log ? a.id : null;
   state.routeTo = a.id;
   store.set('routeTo', a.id);
   setCurrent(a.id);
@@ -221,7 +230,8 @@ async function setEntrance(a) {
 Object.assign(HUB, store.get('hub', {}));
 const HUB_ID = 'hub';
 
-async function showHub() {
+async function showHub(opts = {}) {
+  pendingTrip = opts.log ? HUB_ID : null;
   state.routeTo = HUB_ID;
   store.set('routeTo', HUB_ID);
   if (state.tab !== 'map') go('map');
@@ -239,16 +249,93 @@ async function setHubPoint() {
   showHub();
 }
 
+// ---------- Журнал поездок (для статистики) ----------
+
+let pendingTrip = null;
+const SAME_TRIP_MS = 30 * 60 * 1000;
+
+// Вызывается, когда маршрут построен. Записывает поездку, если её только что начал пользователь.
+async function logTrip(route) {
+  const target = pendingTrip;
+  pendingTrip = null;
+  if (!target || target !== state.routeTo) return;
+  const last = state.trips[state.trips.length - 1];
+  // Повторное нажатие на тот же маршрут, пока ещё не доехал, — та же поездка.
+  if (last && last.target === target && !last.arrivedAt && Date.now() - last.ts < SAME_TRIP_MS) return;
+  const a = target === HUB_ID ? null : state.addresses.find((x) => x.id === target);
+  if (target !== HUB_ID && !a) return;
+  const trip = {
+    id: uid(), ts: Date.now(), target, kind: a ? 'address' : 'hub',
+    street: a?.street || '', house: a?.house || '', zip: a?.zip || '',
+    length: route.length, time: route.time, arrivedAt: null,
+  };
+  state.trips.push(trip);
+  await db.trips.put(trip);
+}
+
+async function markArrived() {
+  const last = state.trips[state.trips.length - 1];
+  if (!last || last.arrivedAt || last.target !== state.routeTo) return;
+  last.arrivedAt = Date.now();
+  await db.trips.put(last);
+}
+
+// ---------- Обновление старых данных ----------
+
+// Выполняется при каждом запуске, но меняет только то, что ещё не исправлено.
+async function migrate() {
+  for (const a of state.addresses) {
+    let dirty = false;
+    // Flink дописывает город второй раз («…, 01069 Dresden, Dresden») — раньше он попадал в комментарий.
+    if (a.comment && isNoise(a.comment, a.city)) { a.comment = ''; dirty = true; }
+    // Адрес не нашёлся на карте — разбираем заново: номер квартиры мог прилипнуть к номеру дома.
+    if (!a.lat) {
+      const p = parseAddress(`${a.street} ${a.house}`);
+      if (p.street && p.house && (p.street !== a.street || p.house !== a.house)) {
+        a.street = p.street;
+        a.house = p.house;
+        if (p.extra) a.comment = [a.comment, p.extra].filter(Boolean).join(', ');
+        dirty = true;
+      }
+    }
+    const key = addressKey(a.street, a.house);
+    if (key !== a.key) { a.key = key; dirty = true; }
+    if (dirty) await db.put(a);
+    if (!a.lat) await ensureCoords(a).catch(() => {});
+  }
+  await backfillTrips();
+}
+
+// Журнал поездок появился в версии 1.9. Для адресов, сохранённых раньше, восстанавливаем по одной
+// поездке на адрес: время — когда адрес был добавлен, расстояние — оценка (по прямой от хаба × 1,35).
+async function backfillTrips() {
+  let since = store.get('tripsSince', null);
+  if (!since) { since = Date.now(); store.set('tripsSince', since); }
+  const known = new Set(state.trips.map((t) => t.target));
+  const added = state.addresses
+    .filter((a) => a.createdAt && a.createdAt < since && !known.has(a.id))
+    .map((a) => ({
+      id: `bf-${a.id}`, ts: a.createdAt, target: a.id, kind: 'address',
+      street: a.street, house: a.house, zip: a.zip,
+      length: a.lat ? Math.round(distance([HUB.lon, HUB.lat], [a.lon, a.lat]) * 1.35) : 0,
+      time: 0, arrivedAt: a.createdAt, estimated: true,
+    }));
+  if (!added.length) return;
+  await db.trips.putMany(added);
+  state.trips = [...state.trips, ...added].sort((a, b) => a.ts - b.ts);
+}
+
 // ---------- Голосовые подсказки ----------
 
 let lastReroute = 0;
 mapView.onGuide((e) => {
   if (e.routeReady) {
     keepAwake(true);
+    logTrip(e.routeReady).catch(() => {});
     if (state.voice) speakRu(summary(e.routeReady.length, e.routeReady.time));
   }
   if (e.say && state.voice) e.say.forEach(speakRu);
-  if (e.pedZone && state.voice) speakRu('Пешеходная зона. Ведите велосипед.');
+  if (e.say?.includes('Вы на месте')) markArrived().catch(() => {});
   if (e.offRoute && Date.now() - lastReroute > 30000) {
     lastReroute = Date.now();
     if (state.voice) speakRu('Вы ушли с маршрута. Перестраиваю.');
@@ -277,7 +364,7 @@ function turnPanel(nav) {
   const icon = h('div', { class: 'turn-icon' });
   icon.innerHTML = arrowSvg(m); // только числа, без пользовательских данных
   const label = m.arrive ? (m.dist < 25 ? 'Вы на месте' : 'До места') : m.text;
-  return h('div', { class: 'turn' + (m.dist < 30 ? ' now' : '') },
+  return h('div', { class: 'turn' + (m.dist <= 22 ? ' now' : '') },
     icon,
     h('div', { class: 'turn-text' },
       (m.arrive && m.dist < 25) || m.dist < 10 ? null : h('div', { class: 'turn-dist' }, fmtKm(m.dist)),
@@ -293,9 +380,10 @@ function renderMap() {
   const wrap = h('div', { class: 'map-screen' });
   const top = h('div', { class: 'map-top' });
   const fabs = h('div', { class: 'map-fabs' });
-  const hubBtn = h('button', { class: 'hub-btn', onclick: showHub }, '🏠 В хаб');
+  const hubBtn = h('button', { class: 'hub-btn', onclick: () => showHub({ log: true }) }, '🏠 В хаб');
   const speedEl = h('div', { class: 'speed', hidden: true, 'aria-label': 'Скорость' });
-  wrap.append(top, fabs, hubBtn, speedEl);
+  const progressEl = h('div', { class: 'route-progress', hidden: true });
+  wrap.append(top, fabs, hubBtn, speedEl, progressEl);
 
 
   const paint = (nav) => {
@@ -351,6 +439,19 @@ function renderMap() {
     top.replaceChildren(...[turnPanel(nav), card, ...banners].filter(Boolean));
 
     hubBtn.hidden = isHub || nav.picking;
+    // Полоса прогресса маршрута: сколько проехал и сколько осталось.
+    const pr = nav.routeState === 'ok' ? nav.progress : null;
+    wrap.classList.toggle('has-progress', !!pr);
+    progressEl.hidden = !pr;
+    if (pr) {
+      const pct = pr.total ? Math.min(100, Math.max(0, (pr.done / pr.total) * 100)) : 0;
+      progressEl.replaceChildren(
+        h('div', { class: 'rp-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)) },
+          h('div', { class: 'rp-fill', style: `width:${pct.toFixed(1)}%` })),
+        h('div', { class: 'rp-text' },
+          h('span', {}, `проехал ${fmtKm(pr.done)}`),
+          h('span', {}, `осталось ${fmtKm(Math.max(0, pr.total - pr.done))}`)));
+    }
     speedEl.hidden = nav.speed == null;
     if (nav.speed != null) speedEl.replaceChildren(h('b', {}, String(Math.round(nav.speed))), h('span', {}, 'км/ч'));
     fabs.replaceChildren(...[
@@ -461,6 +562,7 @@ function renderAddresses() {
 
   wrap.append(
     h('div', { class: 'addr-search' }, input, h('div', { class: 'row' }, pasteBtn, clearBtn)),
+    h('button', { class: 'btn btn-wide btn-ghost', onclick: openStats }, '📊 Статистика поездок'),
     results,
   );
   fill();
@@ -520,7 +622,7 @@ async function openAddress(id) {
 
   openSheet(`${a.street} ${a.house}`, h('div', { class: 'screen' },
     h('p', { class: 'muted' }, [a.zip, a.city].filter(Boolean).join(' ')),
-    h('button', { class: 'btn btn-primary btn-wide', onclick: () => { closeSheet(); showRoute(a); } }, '🗺️ Маршрут на карте'),
+    h('button', { class: 'btn btn-primary btn-wide', onclick: () => { closeSheet(); showRoute(a, { log: true }); } }, '🗺️ Маршрут на карте'),
     a.geoNote ? h('p', { class: 'hint' }, (a.geoApprox ? '⚠️ Точка примерная: ' : '📍 ') + a.geoNote) : null,
     h('div', { class: 'field-label' }, 'Открыть в другом приложении'),
     h('div', { class: 'row' },
@@ -792,8 +894,12 @@ function openSettings() {
       const valid = items.filter((a) => a && a.id && a.street);
       for (const a of valid) a.key = addressKey(a.street, a.house);
       await db.putMany(valid);
+      const trips = (Array.isArray(data.trips) ? data.trips : []).filter((t) => t && t.id && t.ts);
+      await db.trips.putMany(trips);
       await loadAddresses();
-      toast(`Импортировано адресов: ${valid.length}`);
+      await loadTrips();
+      await migrate();
+      toast(`Импортировано: адресов ${valid.length}, поездок ${trips.length}`);
       openSettings();
     } catch {
       toast('Не удалось прочитать файл');
@@ -810,7 +916,8 @@ function openSettings() {
     }
     await db.destroy();
     try { localStorage.clear(); } catch { /* уже пусто */ }
-    state.addresses = []; state.currentId = null; state.heard = []; state.query = '';
+    state.addresses = []; state.trips = []; state.currentId = null; state.routeTo = null; state.heard = []; state.query = '';
+    mapView.clearRoute().catch(() => {});
     toast('Все данные удалены');
     closeSheet();
   } }, '🗑 Удалить все данные');
@@ -818,26 +925,78 @@ function openSettings() {
   const de = germanVoice();
   openSheet('Данные и настройки', h('div', { class: 'screen' },
     h('div', { class: 'info-box' },
-      h('strong', {}, `Адресов в базе: ${state.addresses.length}`),
+      h('strong', {}, `Адресов в базе: ${state.addresses.length} · поездок в журнале: ${state.trips.length}`),
       h('p', {}, 'Адреса, коды и заметки хранятся только на этом телефоне и никуда не отправляются.'),
       h('p', {}, 'Для карты в интернет уходят только: запросы кусочков карты (OpenFreeMap) и координаты начала и конца маршрута (BRouter) — без адреса и заметок. Поиск адреса работает на телефоне.'),
 
     ),
     h('h2', { class: 'section-title' }, 'Резервная копия'),
     h('button', { class: 'btn btn-wide', onclick: () => {
-      download(`flink-helper-backup-${today()}.json`, JSON.stringify({ app: 'flink-helper', version: APP_VERSION, exportedAt: new Date().toISOString(), addresses: state.addresses }, null, 2));
+      download(`flink-helper-backup-${today()}.json`, JSON.stringify({ app: 'flink-helper', version: APP_VERSION, exportedAt: new Date().toISOString(), addresses: state.addresses, trips: state.trips }, null, 2));
     } }, '⬇️ Экспорт в файл'),
     h('button', { class: 'btn btn-wide', onclick: () => fileInput.click() }, '⬆️ Импорт из файла'),
     fileInput,
     h('p', { class: 'hint' }, 'Файл копии содержит адреса и коды — это данные Flink. Не пересылай его никому.'),
     h('h2', { class: 'section-title' }, 'Удаление'),
     deleteBtn,
-    h('p', { class: 'hint' }, 'При увольнении данные компании нужно удалить (§ 10 контракта). Кнопка стирает адреса, заметки и отметки чек-листа.'),
+    h('p', { class: 'hint' }, 'При увольнении данные компании нужно удалить (§ 10 контракта). Кнопка стирает адреса, заметки, журнал поездок и отметки чек-листа.'),
     h('h2', { class: 'section-title' }, 'Голос'),
     h('p', { class: 'hint' }, de ? `Немецкий голос: ${de.name}` : 'Немецкий голос не найден. Android: Настройки → Язык и ввод → Синтез речи → Google → установить «Deutsch».'),
     h('button', { class: 'btn btn-wide', onclick: () => speak('Hallo, hier ist Ihre Bestellung von Flink.') }, '🔊 Проверить голос'),
     h('p', { class: 'hint center' }, `Flink Helper Dresden · v${APP_VERSION}`),
   ));
+}
+
+// ---------- Статистика ----------
+
+const fmtKmNum = (v) => v.toFixed(1).replace('.', ',');
+
+function statList(title, items) {
+  if (!items.length) return null;
+  const max = items[0].count;
+  return [
+    h('h2', { class: 'section-title' }, title),
+    h('div', { class: 'stat-list' }, items.map((it, i) => h('div', { class: 'stat-row' },
+      h('div', { class: 'stat-bar', style: `width:${Math.max(4, (it.count / max) * 100).toFixed(0)}%` }),
+      h('span', { class: 'stat-rank' }, String(i + 1)),
+      h('span', { class: 'stat-label' }, it.label),
+      h('span', { class: 'stat-count' }, `${it.count}×`),
+      h('span', { class: 'stat-km' }, `${fmtKmNum(it.km)} км`)))),
+  ];
+}
+
+function openStats() {
+  const s = computeStats(state.trips);
+  const tile = (label, p) => h('div', { class: 'stat-tile' },
+    h('div', { class: 'stat-tile-label' }, label),
+    h('div', { class: 'stat-tile-value' }, String(p.deliveries)),
+    h('div', { class: 'stat-tile-sub' }, `${plural(p.deliveries, 'доставка', 'доставки', 'доставок')} · ${fmtKmNum(p.km)} км`));
+  const when = (ts) => new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+  const body = !state.trips.length
+    ? h('div', { class: 'screen' },
+      h('div', { class: 'info-box' },
+        h('strong', {}, 'Поездок пока нет'),
+        h('p', {}, 'Журнал ведётся с версии 1.9: поездка записывается, когда ты нажимаешь «Маршрут на карте» или «В хаб». Прошлые маршруты приложение не сохраняло.')))
+    : h('div', { class: 'screen' },
+      h('div', { class: 'stat-tiles' }, tile('Сегодня', s.today), tile('7 дней', s.week), tile('30 дней', s.month), tile('Всего', s.all)),
+      h('p', { class: 'hint' }, [
+        `В среднем ${fmtKmNum(s.avgKm)} км до клиента`,
+        s.busiestHour != null ? `чаще всего заказы в ${s.busiestHour}:00–${s.busiestHour + 1}:00` : null,
+      ].filter(Boolean).join(' · ')),
+      statList('Самые частые адреса', s.topAddresses),
+      statList('Самые частые улицы', s.topStreets),
+      statList('Районы', s.topDistricts),
+      h('h2', { class: 'section-title' }, 'Последние поездки'),
+      h('div', { class: 'stat-list' }, s.recent.map((t) => h('div', { class: 'stat-row plain' },
+        h('span', { class: 'stat-when' }, when(t.ts)),
+        h('span', { class: 'stat-label' }, t.kind === 'hub' ? '🏠 Хаб' : `${t.street} ${t.house}`),
+        h('span', { class: 'stat-km' }, `${fmtKmNum((t.length || 0) / 1000)} км`)))),
+      h('p', { class: 'hint' }, 'Километры — по построенному маршруту, вместе с возвращениями в хаб. Журнал хранится только на этом телефоне.'),
+      state.trips.some((t) => t.estimated)
+        ? h('p', { class: 'hint' }, 'Поездки до версии 1.9 восстановлены по сохранённым адресам: одна на адрес, расстояние — оценка от хаба, без обратной дороги.')
+        : null);
+  openSheet('Статистика', body);
 }
 
 // ---------- Тема ----------
@@ -873,7 +1032,9 @@ async function init() {
     else if (!$('#sheet').hidden) closeSheet();
   });
   await loadAddresses();
+  await loadTrips();
   render();
+  migrate().catch(() => {});
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     // Установленное приложение Android держит в памяти и при возврате не перезагружает,

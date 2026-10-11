@@ -30,3 +30,26 @@ test('search while typing', () => {
   assert.ok(!matches(a, 'Grunaer'));
   assert.ok(matches({ street: 'Löbtauer Straße', house: '3' }, 'loebtauer'));
 });
+
+// Форматы, в которых адрес реально приходит из Flink (примеры выдуманные)
+test('Flink repeats the city after the zip — it must not land in the notes', () => {
+  for (const tail of ['Dresden', '드레스덴', 'Sachsen', 'Deutschland']) {
+    const r = parseAddress(`Hauptstraße 5, 01097 Dresden, ${tail}`);
+    assert.deepEqual([r.street, r.house, r.zip, r.city, r.extra], ['Hauptstraße', '5', '01097', 'Dresden', '']);
+  }
+  assert.equal(parseAddress('Hauptstraße 5, 01097 Dresden, Dresden, 2. OG links').extra, '2. OG links');
+});
+
+test('apartment number after the house number goes to the notes', () => {
+  const r = parseAddress('Grunaer Straße 12 Apt 034, 01069 Dresden, Dresden');
+  assert.deepEqual([r.street, r.house, r.extra], ['Grunaer Straße', '12', 'Apt 034']);
+  assert.equal(parseAddress('Grunaer Str. 12a Whg. 7').house, '12a');
+  // «We»/«Zi» внутри названия улицы не трогаем
+  assert.equal(parseAddress('Zinzendorfstraße 4').street, 'Zinzendorfstraße');
+});
+
+test('Platz and Pl. are the same street', () => {
+  assert.equal(addressKey('Fetscherplatz', '2'), addressKey('Fetscherpl.', '2'));
+  assert.equal(addressKey('Schillerplatz', '9'), addressKey('Schillerpl', '9'));
+  assert.ok(matches({ street: 'Fetscherplatz', house: '2' }, 'fetscherpl 2'));
+});

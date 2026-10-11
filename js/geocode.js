@@ -24,6 +24,10 @@ const houseNum = (h) => parseInt(h, 10);
 // Возвращает { lat, lon, approx, note } или null, если улица не найдена.
 export function lookup(index, { street, house, zip }) {
   let groups = index.get(norm(street));
+  // Перед улицей бывает лишнее слово — название площади или квартала: «Neumarkt Rosmaringasse 5».
+  // Отбрасываем слова спереди, пока не найдём известную улицу.
+  const words = (street || '').trim().split(/\s+/);
+  for (let i = 1; !groups && i < words.length; i++) groups = index.get(norm(words.slice(i).join(' ')));
   if (!groups) return null;
   if (zip) {
     const byZip = groups.filter((g) => g.zip === zip);

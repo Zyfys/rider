@@ -21,6 +21,7 @@ export const nav = {
   picking: false,
   next: null,         // следующий манёвр для панели со стрелкой (см. upcoming в guidance.js)
   speed: null,        // км/ч
+  progress: null,     // { done, total } — метры по маршруту, для полосы прогресса
 };
 
 // Скорость: из GPS, а если телефон её не даёт — по двум последним точкам. Сглаживаем, чтобы цифра не прыгала.
@@ -49,7 +50,9 @@ let routeCoords = [];
 let listener = () => {};
 let theme = 'dark';
 let guide = null;
-// События для голоса: { say: [фразы] } | { routeReady: {length, time} } | { offRoute: true } | { pedZone: true }
+const FOLLOW_ZOOM = 16.5;
+let followZoom = null;
+// События для голоса: { say: [фразы] } | { routeReady: {length, time} } | { offRoute: true }
 let guideListener = () => {};
 export const onGuide = (fn) => { guideListener = fn; };
 
@@ -78,12 +81,17 @@ export async function getMapElement() {
     attributionControl: { compact: true },
   });
   map.touchZoomRotate.disableRotation();
-  loaded = new Promise((resolve) => map.on('load', () => {
+  // Ждём только стиль, а не событие load (оно наступает, когда загружены все кусочки карты):
+  // при медленном интернете маршрут и своя точка должны появляться сразу, карта догрузится под ними.
+  loaded = new Promise((resolve) => map.once('style.load', () => {
     addOverlayLayers(map, theme);
-    // Подпись авторов карты по умолчанию раскрыта и закрывает низ экрана — сворачиваем в значок «i».
-    el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
     resolve();
   }));
+  // Подпись авторов карты по умолчанию раскрыта и закрывает низ экрана — сворачиваем в значок «i».
+  // Она раскрывается, когда приходят данные источника, поэтому сворачиваем после полной загрузки.
+  map.once('load', () => el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
+  // Пользователь сам изменил масштаб — больше не тянем карту к масштабу «следования».
+  map.on('zoomstart', (e) => { if (e.originalEvent) followZoom = null; });
 
   map.on('dragstart', () => { if (nav.follow) { nav.follow = false; emit(); } });
   startGps();
@@ -112,13 +120,15 @@ function startGps() {
     nav.gps = 'ok';
     await loaded;
     map.getSource('me').setData(fc([point(nav.me.lon, nav.me.lat)]));
-    if (nav.follow && !nav.picking) map.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: first ? Math.max(map.getZoom(), 16.5) : map.getZoom(), duration: first ? 0 : 600 });
-    const wasInZone = nav.inPedZone;
+    if (first) followZoom = Math.max(map.getZoom(), FOLLOW_ZOOM);
+    // followZoom — куда приближаемся после нажатия ◎. Без него новое положение GPS прерывало бы
+    // анимацию приближения, и карта оставалась бы отдалённой.
+    if (nav.follow && !nav.picking) map.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: followZoom ?? map.getZoom(), duration: first ? 0 : 600 });
     checkPedZone();
-    if (nav.inPedZone && !wasInZone) guideListener({ pedZone: true });
     if (guide && !nav.picking) {
-      const r = step(guide, [nav.me.lon, nav.me.lat]);
+      const r = step(guide, [nav.me.lon, nav.me.lat], nav.speed == null ? null : nav.speed / 3.6);
       nav.next = r.next;
+      if (r.s != null) nav.progress = { done: r.s, total: guide.total };
       if (r.say.length) guideListener({ say: r.say });
       if (r.offRoute) guideListener({ offRoute: true });
     }
@@ -126,7 +136,7 @@ function startGps() {
   }, (err) => {
     nav.gps = err.code === 1 ? 'denied' : 'unavailable';
     emit();
-  }, { enableHighAccuracy: true, maximumAge: 3000, timeout: 30000 });
+  }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
 }
 
 // Стою ли я в пешеходной зоне — проверяем по отрисованному слою под своей точкой.
@@ -160,6 +170,7 @@ export async function routeTo(dest, profile) {
   routeCoords = [];
   guide = null;
   nav.next = null;
+  nav.progress = null;
 
   const start = (await waitForFix(6000)) || HUB;
   if (token !== routeToken) return;
@@ -176,6 +187,7 @@ export async function routeTo(dest, profile) {
     map.getSource('route').setData(gj);
     guide = buildGuide(routeCoords, props.voicehints || []);
     nav.next = upcoming(guide, 0);
+    nav.progress = { done: 0, total: guide.total };
     guideListener({ routeReady: nav.route });
     fitRoute();
   } catch {
@@ -197,6 +209,7 @@ export async function clearRoute() {
   routeCoords = [];
   guide = null;
   nav.next = null;
+  nav.progress = null;
   emit();
 }
 
@@ -214,7 +227,8 @@ export function fitRoute() {
 
 export function followMe() {
   nav.follow = true;
-  if (nav.me) map?.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: Math.max(map.getZoom(), 16.5), duration: 400 });
+  if (map) followZoom = Math.max(map.getZoom(), FOLLOW_ZOOM);
+  if (nav.me) map?.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: followZoom, duration: 400 });
   emit();
 }
 

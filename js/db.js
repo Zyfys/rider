@@ -1,8 +1,7 @@
-// Локальное хранилище адресов (IndexedDB). Ничего не уходит с устройства.
+// Локальное хранилище (IndexedDB): адреса с заметками и журнал поездок. Ничего не уходит с устройства.
 
 const DB_NAME = 'flink-helper';
-const DB_VERSION = 1;
-const STORE = 'addresses';
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -12,36 +11,47 @@ function open() {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          const store = db.createObjectStore(STORE, { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('addresses')) {
+          const store = db.createObjectStore('addresses', { keyPath: 'id' });
           store.createIndex('key', 'key', { unique: false });
         }
+        // v2: журнал поездок для статистики
+        if (!db.objectStoreNames.contains('trips')) db.createObjectStore('trips', { keyPath: 'id' });
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        // Другая вкладка обновляет базу — освобождаем её, чтобы обновление не зависло.
+        req.result.onversionchange = () => { req.result.close(); dbPromise = null; };
+        resolve(req.result);
+      };
       req.onerror = () => reject(req.error);
     });
   }
   return dbPromise;
 }
 
-async function tx(mode, fn) {
+async function tx(storeName, mode, fn) {
   const db = await open();
   return new Promise((resolve, reject) => {
-    const t = db.transaction(STORE, mode);
-    const result = fn(t.objectStore(STORE));
+    const t = db.transaction(storeName, mode);
+    const result = fn(t.objectStore(storeName));
     t.oncomplete = () => resolve(result && 'result' in result ? result.result : undefined);
     t.onerror = () => reject(t.error);
     t.onabort = () => reject(t.error);
   });
 }
 
-export const getAll = () => tx('readonly', (s) => s.getAll());
-export const get = (id) => tx('readonly', (s) => s.get(id));
-export const put = (item) => tx('readwrite', (s) => s.put(item));
-export const remove = (id) => tx('readwrite', (s) => s.delete(id));
-export const clear = () => tx('readwrite', (s) => s.clear());
+const table = (name) => ({
+  getAll: () => tx(name, 'readonly', (s) => s.getAll()),
+  get: (id) => tx(name, 'readonly', (s) => s.get(id)),
+  put: (item) => tx(name, 'readwrite', (s) => s.put(item)),
+  remove: (id) => tx(name, 'readwrite', (s) => s.delete(id)),
+  clear: () => tx(name, 'readwrite', (s) => s.clear()),
+  putMany: (items) => tx(name, 'readwrite', (s) => { items.forEach((i) => s.put(i)); }),
+});
 
-export const putMany = (items) => tx('readwrite', (s) => { items.forEach((i) => s.put(i)); });
+// Адреса — основная таблица, её функции доступны напрямую: db.getAll(), db.put() …
+export const { getAll, get, put, remove, clear, putMany } = table('addresses');
+export const trips = table('trips');
 
 // Полное удаление базы вместе со структурой (для кнопки «Удалить все данные»).
 export async function destroy() {

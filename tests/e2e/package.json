@@ -1,0 +1,7 @@
+{
+  "name": "flink-helper-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Браузерные тесты: node tests/e2e/run.mjs (нужен запущенный node tools/serve.mjs и установленный Chrome)",
+  "devDependencies": { "puppeteer-core": "^25.12.0" }
+}

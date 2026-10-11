@@ -35,3 +35,15 @@ test('letter suffix / missing number fall back to approximate point', () => {
 test('unknown street → null', () => {
   assert.equal(lookup(index, { street: 'Nichtexistierende Gasse', house: '1', zip: '' }), null);
 });
+
+test('«Pl» abbreviation is found as Platz', () => {
+  const r = lookup(index, { street: 'Fetscherpl', house: '2', zip: '01307' });
+  assert.ok(r && !r.approx, JSON.stringify(r));
+});
+
+test('extra word before the street name is skipped', () => {
+  const r = lookup(index, { street: 'Neumarkt Rosmaringasse', house: '5', zip: '01067' });
+  assert.ok(r && !r.approx, JSON.stringify(r));
+  const direct = lookup(index, { street: 'Rosmaringasse', house: '5', zip: '01067' });
+  assert.deepEqual([r.lat, r.lon], [direct.lat, direct.lon]);
+});
