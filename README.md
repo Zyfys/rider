@@ -5,7 +5,7 @@
 - Работает офлайн (PWA), ставится на Android как приложение.
 - Адреса, коды, заметки и журнал поездок — только на телефоне (IndexedDB), никуда не отправляются.
 - Поиск координат адреса — по офлайн-базе OSM на телефоне.
-- В сеть уходят только запросы тайлов карты ([OpenFreeMap](https://openfreemap.org)) и координаты начала/конца маршрута ([BRouter](https://brouter.de)).
+- В сеть уходят только запросы тайлов карты ([OpenFreeMap](https://openfreemap.org)), координаты начала/конца маршрута и профиль маршрутизации без личных данных ([BRouter](https://brouter.de)).
 - Без сборки: чистые HTML/CSS/JS, карта — [MapLibre GL JS](https://maplibre.org) (лежит в `vendor/`).
 
 ## Проверка на компьютере
@@ -53,6 +53,8 @@ node tools/build-addresses.mjs   # скачивает из Overpass → data/add
 | `js/guidance.js`, `js/arrows.js` | Голосовые подсказки и стрелки поворотов по маршруту BRouter |
 | `js/stats.js` | Статистика по журналу поездок |
 | `js/geocode.js` | Координаты адреса по офлайн-базе OSM |
+| `profiles/flink-*.brf` | Свои профили BRouter (стандартные с правкой про `bicycle=use_sidepath`); собираются `tools/build-profiles.mjs` |
+| `tools/build-private-map.mjs` | Личная карта всех адресов и маршрутов из резервной копии → `private/` (не в git) |
 | `js/address.js` | Разбор адреса из Flink, поиск |
 | `js/db.js` | Локальное хранилище: адреса и журнал поездок |
 | `sw.js` | Офлайн-кэш |

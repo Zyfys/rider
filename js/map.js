@@ -156,6 +156,45 @@ function waitForFix(ms) {
   });
 }
 
+// ---------- Свой профиль BRouter ----------
+
+// Стандартные велопрофили BRouter считают участок с bicycle=use_sidepath закрытым и, если велодорожка
+// рядом не нанесена на карту, ведут в объезд. В profiles/flink-*.brf это правило исправлено.
+// Профиль загружается на сервер BRouter (в нём нет личных данных), сервер возвращает его временный id.
+const PROFILE_VERSION = 1; // увеличить при изменении profiles/*.brf
+const PROFILE_TTL = 12 * 3600 * 1000;
+
+async function customProfileId(profile, force = false) {
+  const key = `brouterProfile:${profile}`;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* нет сохранённого */ }
+  if (!force && saved?.v === PROFILE_VERSION && Date.now() - saved.ts < PROFILE_TTL) return saved.id;
+  const text = await (await fetch(`./profiles/flink-${profile}.brf`)).text();
+  const res = await fetch('https://brouter.de/brouter/profile', {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: text, signal: AbortSignal.timeout(12000),
+  });
+  if (!res.ok) throw new Error(`profile upload ${res.status}`);
+  const { profileid } = await res.json();
+  if (!profileid) throw new Error('profile upload: no id');
+  try { localStorage.setItem(key, JSON.stringify({ id: profileid, v: PROFILE_VERSION, ts: Date.now() })); } catch { /* не критично */ }
+  return profileid;
+}
+
+async function fetchRoute(start, dest, profile) {
+  const url = (p) => `https://brouter.de/brouter?lonlats=${start.lon.toFixed(6)},${start.lat.toFixed(6)}|${dest.lon.toFixed(6)},${dest.lat.toFixed(6)}&profile=${p}&alternativeidx=0&format=geojson&timode=2`;
+  // 1) свой профиль; 2) сервер его уже забыл — загружаем заново; 3) не вышло — стандартный, лишь бы маршрут был.
+  for (const force of [false, true]) {
+    try {
+      const res = await fetch(url(await customProfileId(profile, force)), { signal: AbortSignal.timeout(15000) });
+      if (res.ok) return await res.json();
+    } catch { /* пробуем следующий вариант */ }
+    if (navigator.onLine === false) break;
+  }
+  const res = await fetch(url(profile), { signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
 // ---------- Маршрут ----------
 
 export async function routeTo(dest, profile) {
@@ -174,11 +213,8 @@ export async function routeTo(dest, profile) {
 
   const start = (await waitForFix(6000)) || HUB;
   if (token !== routeToken) return;
-  const url = `https://brouter.de/brouter?lonlats=${start.lon.toFixed(6)},${start.lat.toFixed(6)}|${dest.lon.toFixed(6)},${dest.lat.toFixed(6)}&profile=${profile}&alternativeidx=0&format=geojson&timode=2`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
-    if (!res.ok) throw new Error(await res.text());
-    const gj = await res.json();
+    const gj = await fetchRoute(start, dest, profile);
     if (token !== routeToken) return;
     const props = gj.features[0].properties;
     nav.route = { length: +props['track-length'], time: +props['total-time'], fromHub: start === HUB };

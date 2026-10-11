@@ -2,7 +2,7 @@
 //
 // Файлы приложения — «сначала сеть»: при интернете всегда свежая версия,
 // без интернета — сохранённая копия. Версию CACHE менять при изменении списка FILES.
-const CACHE = 'flink-helper-v7';
+const CACHE = 'flink-helper-v8';
 const TILES = 'flink-helper-tiles';
 const MAX_TILES = 4000;
 const NETWORK_TIMEOUT = 3000;
@@ -26,6 +26,8 @@ const FILES = [
   './vendor/maplibre-gl-worker.mjs',
   './vendor/maplibre-gl.css',
   './data/addresses-dresden.json',
+  './profiles/flink-fastbike.brf',
+  './profiles/flink-trekking.brf',
   './manifest.webmanifest',
   './icons/icon.svg',
   './icons/icon-192.png',

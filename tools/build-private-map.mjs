@@ -4,7 +4,8 @@
 //
 // Результат — один файл private/karta-adresov.html (папка private/ не попадает в git:
 // внутри адреса клиентов). Открывается в браузере, работает и на телефоне.
-// Маршруты строятся заново через BRouter от хаба — как их строит приложение («Быстрый» профиль).
+// Маршруты строятся заново через BRouter от хаба — как их строит приложение
+// («Быстрый» профиль с правкой из profiles/flink-fastbike.brf).
 // Откуда на самом деле начиналась каждая поездка, приложение не записывало.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { buildStyle, THEMES } from '../js/map-style.js';
@@ -48,15 +49,29 @@ const cacheFile = new URL('../private/routes-cache.json', import.meta.url);
 const cache = existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, 'utf8')) : {};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let built = 0;
+
+// Тот же профиль, что использует приложение: стандартный «Быстрый» с правкой про use_sidepath.
+// Сервер хранит загруженный профиль недолго, поэтому загружаем его при каждом запуске.
+const PROFILE_TAG = 'flink-fastbike-1';
+const profileText = readFileSync(new URL('../profiles/flink-fastbike.brf', import.meta.url), 'utf8');
+async function uploadProfile() {
+  const res = await fetch('https://brouter.de/brouter/profile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: profileText });
+  if (!res.ok) throw new Error(`не удалось загрузить профиль: ${res.status}`);
+  return (await res.json()).profileid;
+}
+let profileId = null;
 for (const [i, p] of points.entries()) {
-  const key = `${hub.lon.toFixed(5)},${hub.lat.toFixed(5)}|${p.lon.toFixed(5)},${p.lat.toFixed(5)}`;
+  const lonlats = `${hub.lon.toFixed(5)},${hub.lat.toFixed(5)}|${p.lon.toFixed(5)},${p.lat.toFixed(5)}`;
+  const key = `${PROFILE_TAG}|${lonlats}`;
   if (!cache[key]) {
-    const url = `https://brouter.de/brouter?lonlats=${key}&profile=fastbike&alternativeidx=0&format=geojson`;
     try {
       // Бесплатный сервер ограничивает частоту запросов: при отказе ждём и пробуем снова.
       let res;
       for (let attempt = 0; attempt < 6; attempt++) {
+        profileId ||= await uploadProfile();
+        const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=${profileId}&alternativeidx=0&format=geojson`;
         res = await fetch(url, { headers: { 'User-Agent': 'flink-helper-dresden/1.9 (personal map)' }, signal: AbortSignal.timeout(30000) });
+        if (res.status === 500 && attempt < 2) { await res.text(); profileId = null; continue; } // профиль на сервере устарел
         if (res.status !== 403 && res.status !== 429) break;
         await res.text();
         process.stdout.write(`\rмаршруты: ${i}/${points.length} — сервер просит подождать, пауза ${15 * (attempt + 1)} с `);

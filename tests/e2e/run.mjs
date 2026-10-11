@@ -31,10 +31,21 @@ await page.evaluateOnNewDocument(() => {
 });
 // BRouter: всегда отдаём один и тот же сохранённый маршрут — тест не зависит от сети и изменений карты.
 // Запрос уходит из страницы, поэтому service worker его не перехватывает.
+// Приложение сначала загружает на сервер свой профиль (POST /brouter/profile) и строит маршрут с его id.
+const brouter = { uploads: 0, profiles: [], failNext: 1 }; // первый запрос маршрута «сервер забыл профиль»
 await page.setRequestInterception(true);
 page.on('request', (req) => {
-  if (req.url().startsWith('https://brouter.de/')) {
-    req.respond({ status: 200, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: fixture });
+  const url = req.url();
+  const cors = { 'Access-Control-Allow-Origin': '*' };
+  if (url.startsWith('https://brouter.de/brouter/profile')) {
+    brouter.uploads++;
+    brouter.lastUpload = req.postData() || '';
+    req.respond({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify({ profileid: `custom_test${brouter.uploads}` }) });
+  } else if (url.startsWith('https://brouter.de/')) {
+    const profile = new URL(url).searchParams.get('profile');
+    brouter.profiles.push(profile);
+    if (profile.startsWith('custom_') && brouter.failNext-- > 0) req.respond({ status: 500, headers: cors, body: 'profile not found' });
+    else req.respond({ status: 200, contentType: 'application/json', headers: cors, body: fixture });
   } else req.continue();
 });
 const errors = [];
@@ -129,6 +140,9 @@ try {
   await page.click('.hub-btn');
   await waitText(/Хаб[\s\S]*(км|м) · ~\d+ мин/);
   assert((await said())[0].startsWith('Маршрут построен'), 'route summary spoken');
+  assert(brouter.lastUpload.includes('bicycle=use_sidepath') && brouter.lastUpload.includes('0.3'), 'custom BRouter profile (use_sidepath fix) is uploaded');
+  assert(brouter.profiles[0] === 'custom_test1' && brouter.profiles[1] === 'custom_test2' && brouter.uploads === 2,
+    'route uses the custom profile; when the server forgot it, the app re-uploads and retries');
   assert(/проехал 0 м[\s\S]*осталось 2,3 км/.test(await text()), 'progress bar shows 0 done / 2,3 km left');
   T = await trips();
   assert(T.length === 8 && T.some((x) => x.kind === 'hub' && !x.estimated), 'hub trip logged');
@@ -136,6 +150,7 @@ try {
   await page.click('.fab[aria-label="Перестроить маршрут"], button[aria-label="Перестроить маршрут"]');
   await sleep(1500);
   assert((await trips()).length === 8, 'rebuilding the same route is not a new trip');
+  assert(brouter.uploads === 2 && brouter.profiles.at(-1) === 'custom_test2', 'profile id is reused, not uploaded for every route');
 
   await page.click('.fab[aria-label="Моё местоположение"]');
   const pts = [];

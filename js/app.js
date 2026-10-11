@@ -7,7 +7,7 @@ import { summary, plural, distance } from './guidance.js';
 import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -927,7 +927,7 @@ function openSettings() {
     h('div', { class: 'info-box' },
       h('strong', {}, `Адресов в базе: ${state.addresses.length} · поездок в журнале: ${state.trips.length}`),
       h('p', {}, 'Адреса, коды и заметки хранятся только на этом телефоне и никуда не отправляются.'),
-      h('p', {}, 'Для карты в интернет уходят только: запросы кусочков карты (OpenFreeMap) и координаты начала и конца маршрута (BRouter) — без адреса и заметок. Поиск адреса работает на телефоне.'),
+      h('p', {}, 'Для карты в интернет уходят только: запросы кусочков карты (OpenFreeMap) и координаты начала и конца маршрута и правила построения маршрута (BRouter) — без адреса и заметок. Поиск адреса работает на телефоне.'),
 
     ),
     h('h2', { class: 'section-title' }, 'Резервная копия'),
