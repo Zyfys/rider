@@ -8,7 +8,7 @@ import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 import { worstClimb } from './elevation.js';
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.11.1';
 
 // ---------- Мелкие помощники ----------
 
