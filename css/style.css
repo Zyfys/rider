@@ -383,6 +383,9 @@ main.is-map { position: relative; overflow: hidden; }
 .map-card .addr-hint { font-size: 13px; }
 .map-status { font-size: 15px; font-weight: 700; color: var(--accent); }
 .map-approx { font-size: 13px; color: var(--warn-text); }
+.map-climb { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: var(--warn-text); }
+.map-climb.steep { color: var(--red); }
+.map-climb .banner-btn { min-height: 28px; }
 .small-seg { flex: 1; padding: 2px; }
 .small-seg .seg { min-height: 32px; font-size: 14px; border-radius: 10px; }
 .map-banner {
@@ -461,7 +464,9 @@ main.is-map { position: relative; overflow: hidden; }
   border-top: 1px solid var(--line);
 }
 .route-progress[hidden] { display: none; }
-.rp-bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.rp-bar { position: relative; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.rp-climb { position: absolute; top: 0; height: 100%; min-width: 3px; background: var(--yellow); }
+.rp-climb.steep { background: var(--red); }
 .rp-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .6s linear; }
 .rp-text { display: flex; justify-content: space-between; margin-top: 3px; font-size: 13px; font-weight: 700; }
 .rp-text span:last-child { color: var(--accent); }

@@ -15,6 +15,20 @@ mkdirSync(SHOTS, { recursive: true });
 const fixture = readFileSync(new URL('../fixtures/route-johannstadt-hub.json', import.meta.url), 'utf8');
 const route = JSON.parse(fixture).features[0].geometry.coordinates;
 
+// Тот же маршрут, но с горкой: с 800-го по 1100-й метр уклон 9 % (+27 м). Его мок отдаёт для профиля
+// «Быстрый»; для «Без горок» — исходный ровный. Так проверяется и показ подъёма, и кнопка «Объехать».
+const hillyFixture = (() => {
+  const gj = JSON.parse(fixture);
+  const pts = gj.features[0].geometry.coordinates;
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) {
+    if (i) s += Math.hypot((pts[i][0] - pts[i - 1][0]) * 70000, (pts[i][1] - pts[i - 1][1]) * 111000);
+    pts[i][2] = 113 + Math.max(0, Math.min(300, s - 800)) * 0.09;
+  }
+  gj.features[0].properties['filtered ascend'] = '27';
+  return JSON.stringify(gj);
+})();
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let passed = 0;
 const assert = (cond, msg) => { if (!cond) throw new Error('ASSERT: ' + msg); passed++; console.log('ok -', msg); };
@@ -32,7 +46,7 @@ await page.evaluateOnNewDocument(() => {
 // BRouter: всегда отдаём один и тот же сохранённый маршрут — тест не зависит от сети и изменений карты.
 // Запрос уходит из страницы, поэтому service worker его не перехватывает.
 // Приложение сначала загружает на сервер свой профиль (POST /brouter/profile) и строит маршрут с его id.
-const brouter = { uploads: 0, profiles: [], failNext: 1 }; // первый запрос маршрута «сервер забыл профиль»
+const brouter = { uploads: 0, profiles: [], failNext: 1, texts: {} }; // первый запрос маршрута «сервер забыл профиль»
 await page.setRequestInterception(true);
 page.on('request', (req) => {
   const url = req.url();
@@ -40,12 +54,16 @@ page.on('request', (req) => {
   if (url.startsWith('https://brouter.de/brouter/profile')) {
     brouter.uploads++;
     brouter.lastUpload = req.postData() || '';
+    brouter.texts[`custom_test${brouter.uploads}`] = brouter.lastUpload;
     req.respond({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify({ profileid: `custom_test${brouter.uploads}` }) });
   } else if (url.startsWith('https://brouter.de/')) {
     const profile = new URL(url).searchParams.get('profile');
     brouter.profiles.push(profile);
     if (profile.startsWith('custom_') && brouter.failNext-- > 0) req.respond({ status: 500, headers: cors, body: 'profile not found' });
-    else req.respond({ status: 200, contentType: 'application/json', headers: cors, body: fixture });
+    else {
+      const noHillPenalty = /assign uphillcost\s+= 0 /.test(brouter.texts[profile] || '');
+      req.respond({ status: 200, contentType: 'application/json', headers: cors, body: noHillPenalty ? hillyFixture : fixture });
+    }
   } else req.continue();
 });
 const errors = [];
@@ -84,7 +102,8 @@ const addresses = () => readStore('addresses');
 try {
   await page.setGeolocation({ latitude: route[0][1], longitude: route[0][0] });
   await page.goto(BASE, { waitUntil: 'networkidle0' });
-  await page.evaluate(async () => { localStorage.clear(); await new Promise((r) => { const d = indexedDB.deleteDatabase('flink-helper'); d.onsuccess = d.onerror = d.onblocked = r; }); });
+  // profile = fastbike без отметки easyProfile — как у установленного приложения до версии 1.11.
+  await page.evaluate(async () => { localStorage.clear(); localStorage.setItem('profile', '"fastbike"'); await new Promise((r) => { const d = indexedDB.deleteDatabase('flink-helper'); d.onsuccess = d.onerror = d.onblocked = r; }); });
   await page.reload({ waitUntil: 'networkidle0' });
   await sleep(1500);
 
@@ -141,6 +160,7 @@ try {
   await waitText(/Хаб[\s\S]*(км|м) · ~\d+ мин/);
   assert((await said())[0].startsWith('Маршрут построен'), 'route summary spoken');
   assert(brouter.lastUpload.includes('bicycle=use_sidepath') && brouter.lastUpload.includes('0.3'), 'custom BRouter profile (use_sidepath fix) is uploaded');
+  assert(/assign uphillcost\s+= 300 /.test(brouter.lastUpload) && /assign uphillcutoff\s+= 3 /.test(brouter.lastUpload), 'after the update the profile is switched to «Без горок» once (uphill penalty)');
   assert(brouter.profiles[0] === 'custom_test1' && brouter.profiles[1] === 'custom_test2' && brouter.uploads === 2,
     'route uses the custom profile; when the server forgot it, the app re-uploads and retries');
   assert(/проехал 0 м[\s\S]*осталось 2,3 км/.test(await text()), 'progress bar shows 0 done / 2,3 km left');
@@ -151,6 +171,21 @@ try {
   await sleep(1500);
   assert((await trips()).length === 8, 'rebuilding the same route is not a new trip');
   assert(brouter.uploads === 2 && brouter.profiles.at(-1) === 'custom_test2', 'profile id is reused, not uploaded for every route');
+
+  // ---------- Подъёмы: «Быстрый» ведёт через горку, «Объехать» возвращает пологий маршрут ----------
+  assert(!/⛰/.test(await text()), 'flat route: no climb line');
+  await clickText('.seg', 'Быстрый');
+  await waitText(/⛰ Крутой подъём \d+ м, до 9 %/);
+  assert(/· ↗ 27 м/.test(await text()), 'route card shows the ascent');
+  assert((await said()).at(-1).endsWith('На пути крутой подъём.'), 'steep climb mentioned in the spoken summary');
+  assert(await page.evaluate(() => document.querySelectorAll('.rp-climb.steep').length === 1), 'climb marked on the progress bar');
+  await sleep(1200);
+  await shot('02a-climb');
+  await clickText('.map-climb button', 'Объехать');
+  await sleep(1500);
+  assert(!/⛰/.test(await text()) && brouter.profiles.at(-1) === 'custom_test2', '«Объехать» switches to the hill-avoiding profile');
+  assert(await page.evaluate(() => localStorage.getItem('profile')) === '"easy"', 'profile choice is saved');
+  assert((await trips()).length === 8, 'switching the profile is not a new trip');
 
   await page.click('.fab[aria-label="Моё местоположение"]');
   const pts = [];
@@ -164,6 +199,8 @@ try {
   for (const [i, [lon, lat]] of pts.entries()) {
     await page.setGeolocation({ latitude: lat, longitude: lon });
     await sleep(60);
+    // Ждём ответа страницы: пока она занята отрисовкой карты, точки GPS копились бы и «перепрыгивали» поворот.
+    await page.evaluate(() => 0);
     if (i % 45 === 0) progress.push(await page.evaluate(() => document.querySelector('.route-progress')?.innerText.replace(/\n/g, ' ')));
     if (i === Math.floor(pts.length / 2)) await shot('02-riding');
   }
@@ -195,14 +232,25 @@ try {
   await sleep(500);
   assert((await trips()).length === 9, 'restoring the route after restart is not a new trip');
 
+  // ---------- Вставленный адрес не разобрался — попадает в список «Не найденные адреса» ----------
+  await clickText('.nav-btn', 'Адреса');
+  await page.evaluate(() => { navigator.clipboard.readText = async () => 'Irgendwo im Hinterhof ohne Nummer'; });
+  await clickText('button', 'Вставить');
+  await waitText(/Ничего не найдено/);
+  await page.type('.addr-input', ' x'); // набор по буквам в список не попадает
+  await sleep(300);
+
   // ---------- Экспорт содержит журнал; удаление стирает всё ----------
   await page.click('#settings-btn');
   await sleep(300);
   assert(/поездок в журнале: 9/.test(await text()), 'settings show the journal size');
+  assert(/Не найденные адреса[\s\S]*Irgendwo im Hinterhof ohne Nummer\s*не разобран/i.test(await text()), 'unparsed pasted address is listed in settings');
+  assert(await page.evaluate(() => JSON.parse(localStorage.getItem('notFound')).length) === 1, 'typing does not add to the not-found list');
   await clickText('button', 'Удалить все данные');
   await clickText('button', 'Точно удалить');
   await sleep(500);
   assert((await addresses()).length === 0 && (await trips()).length === 0, 'delete-all wipes addresses and journal');
+  assert(await page.evaluate(() => localStorage.getItem('notFound')) === null, 'delete-all wipes the not-found list');
 
   console.log(`\n${passed} проверок пройдено. Ошибки в консоли:`, errors.length ? errors : 'нет');
   if (errors.length) process.exitCode = 1;

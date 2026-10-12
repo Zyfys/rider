@@ -1,5 +1,5 @@
 // Собирает свои профили BRouter из стандартных: скачивает fastbike/trekking с brouter.de
-// и вносит одну правку (см. шапку в profiles/flink-*.brf).
+// и вносит правки (см. шапку в profiles/flink-*.brf).
 //
 //   node tools/build-profiles.mjs
 //
@@ -46,12 +46,24 @@ const PATCHES = {
 `],
 };
 
-const header = (name) => `# Flink Helper: профиль BRouter «${name}» с одной правкой.
+// Профиль «Без горок»: fastbike с той же правкой и штрафом за подъём. Подбор значений — на маршрутах
+// от хаба к южной возвышенности (Kaitzer Straße, Bergstraße, Südhöhe): при 300 / 3 % в них не остаётся
+// участков круче 7 %, крюк — до 1,5 км. Меньший штраф оставляет крутые участки, порог ниже 3 %
+// удваивает длину маршрута ради пологих улиц.
+const EASY = [
+  ['assign uphillcost         = 0     #', 'assign uphillcost         = 300   #'],
+  ['assign uphillcutoff       = 1.5   #', 'assign uphillcutoff       = 3     #'],
+];
+const EASY_NOTE = `# Вторая правка — «Без горок»: uphillcost = 300, uphillcutoff = 3. Каждый метр подъёма на уклоне
+# круче 3 % стоит как 300 м пути, поэтому маршрут выбирает более пологую дорогу, даже если она длиннее.
+`;
+
+const header = (name, note = '') => `# Flink Helper: профиль BRouter «${name}» с ${note ? 'двумя правками' : 'одной правкой'}.
 # Источник: https://brouter.de/brouter/profiles2/${name}.brf (BRouter, лицензия MIT).
 # Правка — в accesspenalty: участок с bicycle=use_sidepath («езжай по велодорожке рядом»)
 # считается проезжим с небольшим штрафом 0.3, а не закрытым. Иначе там, где сама велодорожка
 # не нанесена на карту OSM, маршрут делает объезд (пример: St. Petersburger Straße у Pirnaischer Platz).
-# Обновить: node tools/build-profiles.mjs
+${note}# Обновить: node tools/build-profiles.mjs
 #
 `;
 
@@ -61,6 +73,15 @@ for (const [name, [from, to]] of Object.entries(PATCHES)) {
   if (!res.ok) throw new Error(`${name}: ${res.status}`);
   const text = (await res.text()).replace(/\r\n/g, '\n');
   if (!text.includes(from)) throw new Error(`${name}: стандартный профиль изменился, правку нужно пересмотреть`);
-  writeFileSync(new URL(`../profiles/flink-${name}.brf`, import.meta.url), header(name) + text.replace(from, to));
+  const patched = text.replace(from, to);
+  writeFileSync(new URL(`../profiles/flink-${name}.brf`, import.meta.url), header(name) + patched);
   console.log(`profiles/flink-${name}.brf`);
+  if (name !== 'fastbike') continue;
+  let easy = patched;
+  for (const [a, b] of EASY) {
+    if (!easy.includes(a)) throw new Error('fastbike: параметры подъёма изменились, правку «Без горок» нужно пересмотреть');
+    easy = easy.replace(a, b);
+  }
+  writeFileSync(new URL('../profiles/flink-easy.brf', import.meta.url), header(name, EASY_NOTE) + easy);
+  console.log('profiles/flink-easy.brf');
 }

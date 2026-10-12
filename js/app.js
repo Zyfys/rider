@@ -6,8 +6,9 @@ import * as mapView from './map.js';
 import { summary, plural, distance } from './guidance.js';
 import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
+import { worstClimb } from './elevation.js';
 
-const APP_VERSION = '1.10.1';
+const APP_VERSION = '1.11.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -117,8 +118,25 @@ const state = {
   routeTo: store.get('routeTo', null),
   voice: store.get('voice', true),
   theme: store.get('theme', 'dark'),
-  profile: store.get('profile', 'fastbike'),
+  profile: store.get('profile', 'easy'),
 };
+
+// Профиль «Без горок» появился в версии 1.11 — один раз включаем его и тем, у кого был выбран другой.
+if (!store.get('easyProfile', false)) {
+  state.profile = 'easy';
+  store.set('profile', 'easy');
+  store.set('easyProfile', true);
+}
+
+// Адреса, которые приложение не смогло разобрать или найти на карте, — чтобы потом можно было
+// посмотреть, что это было, и исправить. Хранятся только на телефоне, попадают в экспорт.
+function logNotFound(text, why) {
+  const t = text.trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!t) return;
+  const list = store.get('notFound', []).filter((x) => x.text !== t);
+  list.push({ text: t, why, ts: Date.now() });
+  store.set('notFound', list.slice(-20));
+}
 
 async function loadAddresses() {
   state.addresses = await db.getAll();
@@ -206,6 +224,7 @@ async function showRoute(a, opts = {}) {
   try { found = await ensureCoords(a); } catch { toast('Не удалось загрузить базу адресов'); return; }
   if (!found) {
     toast('Адрес не найден в OSM — поставь точку вручную 📌');
+    logNotFound(`${a.street} ${a.house}, ${a.zip || ''}`, 'нет на карте');
     mapView.nav.dest = null;
     setEntrance(a);
     return;
@@ -332,7 +351,7 @@ mapView.onGuide((e) => {
   if (e.routeReady) {
     keepAwake(true);
     logTrip(e.routeReady).catch(() => {});
-    if (state.voice) speakRu(summary(e.routeReady.length, e.routeReady.time));
+    if (state.voice) speakRu(summary(e.routeReady.length, e.routeReady.time, e.routeReady.climbs));
   }
   if (e.say && state.voice) e.say.forEach(speakRu);
   if (e.say?.includes('Вы на месте')) markArrived().catch(() => {});
@@ -376,6 +395,19 @@ const fmtKm = (m) =>
  (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
 const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
 
+// Строка о самом тяжёлом подъёме из тех, что ещё впереди. На быстром профиле крутой подъём можно объехать.
+function climbLine(nav, reroute) {
+  if (nav.routeState !== 'ok' || !nav.route) return null;
+  const done = nav.progress?.done || 0;
+  const c = worstClimb(nav.route.climbs.filter((x) => x.to > done));
+  if (!c) return null;
+  const text = `⛰ ${c.steep ? 'Крутой подъём' : 'Подъём'} ${fmtKm(c.to - c.from)}, до ${Math.round(c.max)} %`;
+  return h('div', { class: 'map-climb' + (c.steep ? ' steep' : '') }, h('span', {}, text),
+    c.steep && state.profile !== 'easy' ? h('button', { class: 'btn btn-ghost banner-btn', onclick: () => {
+      state.profile = 'easy'; store.set('profile', 'easy'); reroute();
+    } }, 'Объехать') : null);
+}
+
 function renderMap() {
   const wrap = h('div', { class: 'map-screen' });
   const top = h('div', { class: 'map-top' });
@@ -407,7 +439,7 @@ function renderMap() {
     } else {
       let status = '';
       if (nav.routeState === 'loading') status = 'Строю маршрут…';
-      else if (nav.routeState === 'ok' && nav.route) status = `${fmtKm(nav.route.length)} · ${fmtMin(nav.route.time)}` + (nav.route.fromHub ? ' · от хаба (нет GPS)' : '');
+      else if (nav.routeState === 'ok' && nav.route) status = `${fmtKm(nav.route.length)} · ${fmtMin(nav.route.time)}` + (nav.route.ascent >= 10 ? ` · ↗ ${nav.route.ascent} м` : '') + (nav.route.fromHub ? ' · от хаба (нет GPS)' : '');
       else if (nav.routeState === 'offline') status = 'Нет интернета — маршрут не построить, точка на карте';
       else if (nav.routeState === 'error') status = 'Маршрут не построился — попробуй ↻';
       card = h('div', { class: 'map-card' },
@@ -421,6 +453,7 @@ function renderMap() {
             state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); keepAwake(false); paint(mapView.nav);
           } }, '✕')),
         status ? h('div', { class: 'map-status' }, status) : null,
+        climbLine(nav, reroute),
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
         a?.geoApprox ? h('div', { class: 'map-approx' }, '⚠️ Точка примерная — поставь вход 📌') : null,
 
@@ -445,7 +478,10 @@ function renderMap() {
       const pct = pr.total ? Math.min(100, Math.max(0, (pr.done / pr.total) * 100)) : 0;
       progressEl.replaceChildren(
         h('div', { class: 'rp-bar', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)) },
-          h('div', { class: 'rp-fill', style: `width:${pct.toFixed(1)}%` })),
+          h('div', { class: 'rp-fill', style: `width:${pct.toFixed(1)}%` }),
+          // Подъёмы на полосе — видно, где на пути горка и сколько до неё.
+          pr.total ? nav.route.climbs.map((c) => h('div', { class: 'rp-climb' + (c.steep ? ' steep' : ''),
+            style: `left:${((c.from / pr.total) * 100).toFixed(1)}%;width:${(((c.to - c.from) / pr.total) * 100).toFixed(1)}%` })) : null),
         h('div', { class: 'rp-text' },
           h('span', {}, `проехал ${fmtKm(pr.done)}`),
           h('span', {}, `осталось ${fmtKm(Math.max(0, pr.total - pr.done))}`)));
@@ -551,6 +587,8 @@ function renderAddresses() {
           `＋ Новый адрес: ${parsed.street} ${parsed.house}`));
       } else if (!exact && !found.length) {
         children.push(h('p', { class: 'muted pad' }, 'Ничего не найдено. Для нового адреса нужен номер дома.'));
+        // Вставленный из Flink адрес не разобрался — запоминаем его (набор по буквам не записываем).
+        if (autoOpen) logNotFound(q, 'не разобран');
       }
       if (found.length) children.push(h('h2', { class: 'section-title' }, exact ? 'Уже есть в базе' : 'Найдено'));
       children.push(...found.map(addressCard));
@@ -921,6 +959,7 @@ function openSettings() {
   } }, '🗑 Удалить все данные');
 
   const de = germanVoice();
+  const notFound = store.get('notFound', []).slice().reverse();
   openSheet('Данные и настройки', h('div', { class: 'screen' },
     h('div', { class: 'info-box' },
       h('strong', {}, `Адресов в базе: ${state.addresses.length} · поездок в журнале: ${state.trips.length}`),
@@ -930,11 +969,19 @@ function openSettings() {
     ),
     h('h2', { class: 'section-title' }, 'Резервная копия'),
     h('button', { class: 'btn btn-wide', onclick: () => {
-      download(`flink-helper-backup-${today()}.json`, JSON.stringify({ app: 'flink-helper', version: APP_VERSION, exportedAt: new Date().toISOString(), addresses: state.addresses, trips: state.trips }, null, 2));
+      download(`flink-helper-backup-${today()}.json`, JSON.stringify({ app: 'flink-helper', version: APP_VERSION, exportedAt: new Date().toISOString(), addresses: state.addresses, trips: state.trips, notFound: store.get('notFound', []) }, null, 2));
     } }, '⬇️ Экспорт в файл'),
     h('button', { class: 'btn btn-wide', onclick: () => fileInput.click() }, '⬆️ Импорт из файла'),
     fileInput,
     h('p', { class: 'hint' }, 'Файл копии содержит адреса и коды — это данные Flink. Не пересылай его никому.'),
+    notFound.length ? [
+      h('h2', { class: 'section-title' }, 'Не найденные адреса'),
+      h('div', { class: 'stat-list' }, notFound.map((x) => h('div', { class: 'stat-row plain' },
+        h('span', { class: 'stat-when' }, shortDate(new Date(x.ts))),
+        h('span', { class: 'stat-label' }, x.text),
+        h('span', { class: 'stat-km' }, x.why)))),
+      h('p', { class: 'hint' }, 'Приложение не смогло их разобрать или найти на карте. Список попадает в экспорт — по нему можно исправить поиск.'),
+    ] : null,
     h('h2', { class: 'section-title' }, 'Удаление'),
     deleteBtn,
     h('p', { class: 'hint' }, 'При увольнении данные компании нужно удалить (§ 10 контракта). Кнопка стирает адреса, заметки, журнал поездок и отметки чек-листа.'),

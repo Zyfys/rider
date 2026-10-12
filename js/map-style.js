@@ -20,6 +20,8 @@ export const THEMES = {
     number: '#eef0f3',
     route: '#56c8ff',
     routeCasing: '#04141d',
+    climb: '#ffa726',
+    steep: '#ff4d4d',
     approx: '#ffc53d',
     me: '#2f80ff',
   },
@@ -40,6 +42,8 @@ export const THEMES = {
     number: '#1c1f24',
     route: '#0a74d0',
     routeCasing: '#ffffff',
+    climb: '#f08c00',
+    steep: '#d81e1e',
     approx: '#d08a00',
     me: '#1a5fe0',
   },
@@ -142,6 +146,9 @@ function overlayLayers(theme) {
       paint: { 'line-color': C.routeCasing, 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 7, 18, 16] } }, 'street-name'],
     [{ id: 'route', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-color': C.route, 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 4, 18, 10] } }, 'street-name'],
+    // Подъёмы на маршруте (источник climbs, свойство steep — крутой).
+    [{ id: 'route-climb', type: 'line', source: 'climbs', layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': ['case', ['get', 'steep'], C.steep, C.climb], 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 4, 18, 10] } }, 'street-name'],
     // Стрелки направления движения вдоль линии маршрута.
     [{ id: 'route-arrows', type: 'symbol', source: 'route', minzoom: 13,
       layout: { 'symbol-placement': 'line', 'symbol-spacing': 70, 'text-field': '›', 'text-font': ['Noto Sans Bold'],
@@ -160,6 +167,7 @@ function overlayLayers(theme) {
 export function addOverlayLayers(map, theme = 'dark') {
   const empty = { type: 'FeatureCollection', features: [] };
   map.addSource('route', { type: 'geojson', data: empty });
+  map.addSource('climbs', { type: 'geojson', data: empty });
   map.addSource('dest', { type: 'geojson', data: empty });
   map.addSource('me', { type: 'geojson', data: empty });
   for (const [layer, before] of overlayLayers(theme)) map.addLayer(layer, before);

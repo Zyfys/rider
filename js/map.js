@@ -3,10 +3,13 @@
 import { buildStyle, addOverlayLayers, applyTheme } from './map-style.js';
 import { HUB } from './geocode.js';
 import { buildGuide, step, upcoming, distance } from './guidance.js';
+import { findClimbs, sliceLine } from './elevation.js';
 
+// std — стандартный профиль BRouter на случай, если свой загрузить не удалось.
 export const PROFILES = [
-  { id: 'fastbike', label: 'Быстрый' },
-  { id: 'trekking', label: 'Спокойный' },
+  { id: 'easy', label: 'Без горок', std: 'fastbike' },
+  { id: 'fastbike', label: 'Быстрый', std: 'fastbike' },
+  { id: 'trekking', label: 'Спокойный', std: 'trekking' },
 ];
 
 // Состояние, которое показывает интерфейс.
@@ -16,7 +19,7 @@ export const nav = {
   follow: true,
   inPedZone: false,
   dest: null,         // { lat, lon, approx }
-  route: null,        // { length, time, fromHub }
+  route: null,        // { length, time, fromHub, ascent — набор высоты в метрах, climbs — подъёмы (elevation.js) }
   routeState: 'idle', // idle | loading | ok | offline | error
   picking: false,
   next: null,         // следующий манёвр для панели со стрелкой (см. upcoming в guidance.js)
@@ -160,6 +163,7 @@ function waitForFix(ms) {
 
 // Стандартные велопрофили BRouter считают участок с bicycle=use_sidepath закрытым и, если велодорожка
 // рядом не нанесена на карту, ведут в объезд. В profiles/flink-*.brf это правило исправлено.
+// Профиль «Без горок» (flink-easy) вдобавок штрафует уклоны круче 3 % и ведёт более пологой дорогой.
 // Профиль загружается на сервер BRouter (в нём нет личных данных), сервер возвращает его временный id.
 const PROFILE_VERSION = 1; // увеличить при изменении profiles/*.brf
 const PROFILE_TTL = 12 * 3600 * 1000;
@@ -190,7 +194,8 @@ async function fetchRoute(start, dest, profile) {
     } catch { /* пробуем следующий вариант */ }
     if (navigator.onLine === false) break;
   }
-  const res = await fetch(url(profile), { signal: AbortSignal.timeout(20000) });
+  const std = PROFILES.find((p) => p.id === profile)?.std || profile;
+  const res = await fetch(url(std), { signal: AbortSignal.timeout(20000) });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -206,6 +211,7 @@ export async function routeTo(dest, profile) {
   await loaded;
   map.getSource('dest').setData(fc([point(dest.lon, dest.lat, { approx: !!dest.approx })]));
   map.getSource('route').setData(fc([]));
+  map.getSource('climbs').setData(fc([]));
   routeCoords = [];
   guide = null;
   nav.next = null;
@@ -217,11 +223,16 @@ export async function routeTo(dest, profile) {
     const gj = await fetchRoute(start, dest, profile);
     if (token !== routeToken) return;
     const props = gj.features[0].properties;
-    nav.route = { length: +props['track-length'], time: +props['total-time'], fromHub: start === HUB };
+    const climbs = findClimbs(gj.features[0].geometry.coordinates);
+    nav.route = { length: +props['track-length'], time: +props['total-time'], fromHub: start === HUB,
+      ascent: +props['filtered ascend'] || 0, climbs };
     nav.routeState = 'ok';
     routeCoords = gj.features[0].geometry.coordinates.map((c) => [c[0], c[1]]);
     map.getSource('route').setData(gj);
-    guide = buildGuide(routeCoords, props.voicehints || []);
+    guide = buildGuide(routeCoords, props.voicehints || [], climbs);
+    // Подъёмы подкрашиваются поверх линии маршрута: оранжевым, крутые — красным.
+    map.getSource('climbs').setData(fc(climbs.map((c) => ({ type: 'Feature', properties: { steep: c.steep },
+      geometry: { type: 'LineString', coordinates: sliceLine(routeCoords, guide.cum, c.from, c.to) } }))));
     nav.next = upcoming(guide, 0);
     nav.progress = { done: 0, total: guide.total };
     guideListener({ routeReady: nav.route });
@@ -242,6 +253,7 @@ export async function clearRoute() {
   await loaded;
   map.getSource('dest').setData(fc([]));
   map.getSource('route').setData(fc([]));
+  map.getSource('climbs').setData(fc([]));
   routeCoords = [];
   guide = null;
   nav.next = null;

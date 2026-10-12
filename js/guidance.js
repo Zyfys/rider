@@ -47,13 +47,15 @@ export function distance(a, b) {
 }
 
 // voicehints: [[индекс точки, код, номер съезда, расстояние до следующей, угол], ...]
-export function buildGuide(coords, hints = []) {
+// climbs — подъёмы из elevation.js; о крутых предупреждаем голосом заранее.
+export function buildGuide(coords, hints = [], climbs = []) {
   const cum = [0];
   for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + distance(coords[i - 1], coords[i]));
   const items = hints
     .map(([idx, cmd, exit, , angle]) => ({ at: cum[Math.min(idx, cum.length - 1)], text: phrase(cmd, exit, angle), cmd, exit, angle }))
     .filter((i) => i.text);
-  return { coords, cum, total: cum[cum.length - 1], items, next: 0, last: 0, pre: false, arrived: false, offCount: 0 };
+  return { coords, cum, total: cum[cum.length - 1], items, next: 0, last: 0, pre: false, arrived: false, offCount: 0,
+    climbs: climbs.filter((c) => c.steep), climb: 0 };
 }
 
 // Следующий манёвр для панели со стрелкой: { text, dist, cmd, exit, angle } или { arrive: true, dist }.
@@ -111,6 +113,11 @@ export function nowDistance(speed) {
 // не успевал попасться лишний перекрёсток.
 const PRE_DISTANCE = 100;
 
+// О крутом подъёме говорим за столько метров до его начала: переключить передачу надо заранее,
+// на самой горке уже поздно.
+const CLIMB_DISTANCE = 120;
+export const CLIMB_PHRASE = 'Впереди крутой подъём. Лёгкая передача, помощь на максимум.';
+
 // Один шаг по новой GPS-точке (speed — м/с, может быть null).
 // Возвращает { say: [фразы], offRoute, next, s — пройдено метров по маршруту }.
 export function step(g, p, speed = null) {
@@ -142,6 +149,13 @@ export function step(g, p, speed = null) {
       g.pre = true;
     }
   }
+  // Подъём уже начался или вот-вот начнётся (маршрут построен или перестроен прямо на горке) —
+  // готовиться поздно, пропускаем молча.
+  while (g.climb < g.climbs.length && g.climbs[g.climb].from - s < 30) g.climb++;
+  if (g.climb < g.climbs.length && g.climbs[g.climb].from - s <= CLIMB_DISTANCE) {
+    say.push(CLIMB_PHRASE);
+    g.climb++;
+  }
   if (!g.arrived && g.total - s < 25) {
     g.arrived = true;
     say.push('Вы на месте');
@@ -149,10 +163,11 @@ export function step(g, p, speed = null) {
   return { say, offRoute: false, next: upcoming(g, s), s };
 }
 
-export function summary(lengthM, timeS) {
+export function summary(lengthM, timeS, climbs = []) {
   const min = Math.max(1, Math.round(timeS / 60));
   const dist = lengthM < 1000
     ? `${Math.round(lengthM / 50) * 50 || 50} метров`
     : `${(lengthM / 1000).toFixed(1).replace('.', ',')} километра`;
-  return `Маршрут построен. ${dist}, ${min} ${plural(min, 'минута', 'минуты', 'минут')}.`;
+  const steep = climbs.some((c) => c.steep) ? ' На пути крутой подъём.' : '';
+  return `Маршрут построен. ${dist}, ${min} ${plural(min, 'минута', 'минуты', 'минут')}.${steep}`;
 }

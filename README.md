@@ -51,9 +51,10 @@ node tools/build-addresses.mjs   # скачивает из Overpass → data/add
 | `js/app.js` | Экраны и логика |
 | `js/map.js`, `js/map-style.js` | Карта, GPS, маршрут; стиль карты (что показывать и каким цветом) |
 | `js/guidance.js`, `js/arrows.js` | Голосовые подсказки и стрелки поворотов по маршруту BRouter |
+| `js/elevation.js` | Подъёмы на маршруте по высотам из BRouter: где, какой длины и крутизны |
 | `js/stats.js` | Статистика по журналу поездок |
 | `js/geocode.js` | Координаты адреса по офлайн-базе OSM |
-| `profiles/flink-*.brf` | Свои профили BRouter (стандартные с правкой про `bicycle=use_sidepath`); собираются `tools/build-profiles.mjs` |
+| `profiles/flink-*.brf` | Свои профили BRouter (стандартные с правкой про `bicycle=use_sidepath`; `flink-easy` — «Без горок», со штрафом за уклон круче 3 %); собираются `tools/build-profiles.mjs` |
 | `tools/build-private-map.mjs` | Личная карта всех адресов и маршрутов из резервной копии → `private/` (не в git) |
 | `js/address.js` | Разбор адреса из Flink, поиск |
 | `js/db.js` | Локальное хранилище: адреса и журнал поездок |
