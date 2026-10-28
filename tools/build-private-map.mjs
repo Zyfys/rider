@@ -14,6 +14,7 @@ import { buildStyle, THEMES } from '../js/map-style.js';
 import { buildIndex, lookup, HUB } from '../js/geocode.js';
 import { parseAddress, isNoise, norm } from '../js/address.js';
 import { DISTRICTS } from '../js/stats.js';
+import { clusterPoints, buildNameIndex, describeRoute } from './frequent-routes.mjs';
 
 // --cached — не обращаться к серверу, взять только уже построенные маршруты (когда BRouter просит подождать).
 const onlyCached = process.argv.includes('--cached');
@@ -75,8 +76,10 @@ async function uploadProfile() {
   return (await res.json()).profileid;
 }
 let profileId = null;
-for (const [i, p] of points.entries()) {
-  const lonlats = `${hub.lon.toFixed(5)},${hub.lat.toFixed(5)}|${p.lon.toFixed(5)},${p.lat.toFixed(5)}`;
+
+// Маршрут from → to: из кэша или с сервера. Возвращает { length, time, line } или null.
+async function getRoute(from, to, what) {
+  const lonlats = `${from.lon.toFixed(5)},${from.lat.toFixed(5)}|${to.lon.toFixed(5)},${to.lat.toFixed(5)}`;
   const key = `${PROFILE_TAG}|${lonlats}`;
   if (!cache[key] && !onlyCached) {
     try {
@@ -85,11 +88,11 @@ for (const [i, p] of points.entries()) {
       for (let attempt = 0; attempt < 6; attempt++) {
         profileId ||= await uploadProfile();
         const url = `https://brouter.de/brouter?lonlats=${lonlats}&profile=${profileId}&alternativeidx=0&format=geojson`;
-        res = await fetch(url, { headers: { 'User-Agent': 'flink-helper-dresden/1.9 (personal map)' }, signal: AbortSignal.timeout(30000) });
+        res = await fetch(url, { headers: { 'User-Agent': 'flink-helper-dresden/1.13 (personal map)' }, signal: AbortSignal.timeout(30000) });
         if (res.status === 500 && attempt < 2) { await res.text(); profileId = null; continue; } // профиль на сервере устарел
         if (res.status !== 403 && res.status !== 429) break;
         await res.text();
-        process.stdout.write(`\rмаршруты: ${i}/${points.length} — сервер просит подождать, пауза ${15 * (attempt + 1)} с `);
+        process.stdout.write(`\r${what} — сервер просит подождать, пауза ${15 * (attempt + 1)} с `);
         await sleep(15000 * (attempt + 1));
       }
       if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 80)}`);
@@ -102,10 +105,15 @@ for (const [i, p] of points.entries()) {
       writeFileSync(cacheFile, JSON.stringify(cache));
       await sleep(1500); // бережно к бесплатному серверу
     } catch (e) {
-      console.warn(`маршрут не построился: ${p.label} — ${e.message}`);
+      console.warn(`\nмаршрут не построился: ${what} — ${e.message}`);
     }
   }
-  if (cache[key]) Object.assign(p, cache[key]);
+  return cache[key] || null;
+}
+
+for (const [i, p] of points.entries()) {
+  const r = await getRoute(hub, p, `маршруты: ${i}/${points.length}`);
+  if (r) Object.assign(p, r);
   process.stdout.write(`\rмаршруты: ${i + 1}/${points.length}`);
 }
 console.log(`\nпостроено заново: ${built}, из кэша: ${points.filter((p) => p.line).length - built}`);
@@ -233,8 +241,61 @@ for (const s of shiftList) {
   delete s.from; delete s.to;
 }
 
+// ---------- Шпаргалка: частые направления, путь туда и обратно словами ----------
+
+// Названия улиц — из OSM (Overpass), один раз; хранятся в private/streets-cache.json.
+const streetsFile = new URL('../private/streets-cache.json', import.meta.url);
+if (!existsSync(streetsFile)) {
+  const lons = points.map((p) => p.lon).concat(hub.lon), lats = points.map((p) => p.lat).concat(hub.lat);
+  const bbox = [Math.min(...lats) - 0.005, Math.min(...lons) - 0.005, Math.max(...lats) + 0.005, Math.max(...lons) + 0.005].map((v) => v.toFixed(4)).join(',');
+  const q = `[out:json][timeout:120];way(${bbox})[highway][name][highway!~"^(motorway|motorway_link|proposed|construction|platform|bus_stop|corridor|elevator)$"];out tags geom;`;
+  const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'flink-helper-dresden/1.13 (personal map)' }, body: 'data=' + encodeURIComponent(q), signal: AbortSignal.timeout(180000) });
+  if (!res.ok) throw new Error(`Overpass: ${res.status}`);
+  const ways = (await res.json()).elements.filter((e) => e.geometry && e.tags.name)
+    .map((e) => ({ name: e.tags.name, coords: e.geometry.map((g) => [+g.lon.toFixed(6), +g.lat.toFixed(6)]) }));
+  writeFileSync(streetsFile, JSON.stringify(ways));
+}
+const nameIndex = buildNameIndex(JSON.parse(readFileSync(streetsFile, 'utf8')));
+
+const LEARN = 12; // сколько направлений в шпаргалке
+const learn = [];
+for (const c of clusterPoints(points, 400, 3).slice(0, LEARN)) {
+  // Образец направления — адрес с маршрутом, ближайший к его центру.
+  const withLine = c.idx.filter((i) => points[i].line);
+  if (!withLine.length) continue;
+  const rep = points[withLine.reduce((b, i) => (meters([points[i].lon, points[i].lat], c.center) < meters([points[b].lon, points[b].lat], c.center) ? i : b))];
+  const back = await getRoute(rep, hub, `обратная дорога ${learn.length + 1}/${LEARN}`);
+  const names = c.idx.reduce((m, i) => { const s = points[i].street; m[s] = (m[s] || 0) + 1; return m; }, {});
+  const topStreets = Object.entries(names).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([s]) => s);
+  const zips = c.idx.reduce((m, i) => { const z = points[i].zip; m[z] = (m[z] || 0) + 1; return m; }, {});
+  const zip = Object.entries(zips).sort((a, b) => b[1] - a[1])[0][0];
+  learn.push({
+    title: topStreets.slice(0, 2).join(' · '), streets: [DISTRICTS[zip] || zip, ...topStreets.slice(2)], count: c.idx.length, idx: c.idx,
+    to: { km: Math.round(rep.length / 100) / 10, min: Math.max(1, Math.round(rep.time / 60)), steps: describeRoute(nameIndex, rep.line), line: rep.line },
+    back: back && { km: Math.round(back.length / 100) / 10, min: Math.max(1, Math.round(back.time / 60)), steps: describeRoute(nameIndex, back.line), line: back.line },
+  });
+}
+process.stdout.write('\n');
+
+// Та же шпаргалка простым текстом — читать с телефона или распечатать.
+const stepText = (s, i, from) => `   ${i + 1}. ${s.turn ? s.turn + ' — ' : from + ' — '}${s.name}, ${s.m >= 1000 ? (s.m / 1000).toFixed(1).replace('.', ',') + ' км' : s.m + ' м'}`;
+const cheat = [
+  'ЧАСТЫЕ МАРШРУТЫ — выучить',
+  `Составлено ${new Date().toLocaleDateString('ru-RU')} по ${points.length} заказам. Путь — до адреса в середине направления (BRouter, «Без горок»).`,
+  '',
+  ...learn.flatMap((d, n) => [
+    `${n + 1}. ${d.title} — ${d.count} заказов (${Math.round(d.count / points.length * 100)} %)`,
+    `   ${d.streets.join(', ')}`,
+    `   ТУДА — ${String(d.to.km).replace('.', ',')} км, ~${d.to.min} мин:`,
+    ...d.to.steps.map((s, i) => stepText(s, i, 'от хаба')),
+    ...(d.back ? [`   ОБРАТНО В ХАБ — ${String(d.back.km).replace('.', ',')} км, ~${d.back.min} мин:`, ...d.back.steps.map((s, i) => stepText(s, i, 'от адреса'))] : []),
+    '',
+  ]),
+].join('\n');
+writeFileSync(new URL('../private/chastye-marshruty.txt', import.meta.url), '\uFEFF' + cheat);
+
 const data = {
-  hub, points, heat, paths, streets, districts, repeats, hours, weekdays, shifts: shiftList,
+  hub, points, heat, paths, streets, districts, repeats, hours, weekdays, shifts: shiftList, learn,
   made: new Date().toLocaleDateString('ru-RU'),
   summary: { count: points.length, routes: withRoute.length, totalKm, shifts: shiftList.length },
 };
@@ -300,6 +361,18 @@ const html = `<!doctype html>
   .seg2 { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--track); }
   .seg2 button { min-height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
   .seg2 button.on { background: #2f343c; color: var(--text); }
+  .learn { margin: 0 0 6px; border: 1px solid var(--line); border-radius: 10px; }
+  .learn.on { border-color: var(--hl); }
+  .learn-head { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; width: 100%; padding: 8px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+  .learn-head:hover { background: var(--track); }
+  .learn-head .val { color: var(--muted); white-space: nowrap; }
+  .learn-streets { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+  .learn-sub { margin: 4px 10px 2px; font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .steps { margin: 0 0 6px; padding: 0 10px; list-style: none; }
+  .steps li { display: grid; grid-template-columns: 22px 1fr auto; gap: 6px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .steps li:last-child { border-bottom: 0; }
+  .steps .arrow { color: var(--hl); font-weight: 800; text-align: center; }
+  .steps .len { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .maplibregl-ctrl-attrib { font-size: 11px; }
   @media (max-width: 600px) { .panel { max-height: 52%; } .big b { font-size: 19px; } }
 </style>
@@ -318,6 +391,7 @@ var DATA = ${json(data)};
 var STYLE = ${json(buildStyle('dark'))};
 var HEAT = ${json(HEAT)};
 var fmt = function (v) { return v.toFixed(1).replace('.', ','); };
+var ARROWS = { '': '●', 'прямо': '↑', 'направо': '→', 'налево': '←', 'плавно направо': '↗', 'плавно налево': '↖', 'разворот': '↩' };
 var fc = function (features) { return { type: 'FeatureCollection', features: features }; };
 var el = function (tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 var map = new maplibregl.Map({ container: 'map', style: STYLE, center: [DATA.hub.lon, DATA.hub.lat], zoom: 12.6, dragRotate: false, attributionControl: { compact: true } });
@@ -349,9 +423,11 @@ function paintMap() {
   map.setLayoutProperty('routes', 'visibility', showHeat ? 'none' : 'visible');
   map.getSource('routes').setData(fc(routeFeatures(list)));
   map.getSource('points').setData(fc(pointFeatures(list)));
-  var hlLines = [], hlPoints = [];
+  var hlLines = [], hlPoints = [], hlBack = [];
   if (highlight && highlight.lines) hlLines = [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: highlight.lines } }];
-  if (highlight && highlight.idx) {
+  if (highlight && highlight.back && highlight.back.length) hlBack = [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: highlight.back } }];
+  if (highlight && highlight.idx && highlight.keepRoutes) hlPoints = pointFeatures(highlight.idx.map(function (i) { return { p: DATA.points[i], i: i }; }));
+  else if (highlight && highlight.idx) {
     var sel = highlight.idx.map(function (i) { return { p: DATA.points[i], i: i }; });
     hlLines = routeFeatures(sel);
     hlPoints = pointFeatures(sel);
@@ -362,6 +438,7 @@ function paintMap() {
     hlPoints = pointFeatures(one);
   }
   map.getSource('hl').setData(fc(hlLines));
+  map.getSource('hl-back').setData(fc(hlBack));
   map.getSource('hl-points').setData(fc(hlPoints));
 }
 
@@ -416,7 +493,7 @@ function pickPoints(kind, it) {
 }
 
 var TABS = [
-  ['overview', 'Обзор'], ['paths', 'Пути'], ['streets', 'Куда'], ['districts', 'Районы'], ['time', 'Время'],
+  ['overview', 'Обзор'], ['learn', 'Выучить'], ['paths', 'Пути'], ['streets', 'Куда'], ['districts', 'Районы'], ['time', 'Время'],
 ];
 
 function renderBody() {
@@ -458,6 +535,39 @@ function renderBody() {
     });
     body.append(chips);
     body.append(el('p', null, 'Нажми на точку — покажу адрес и маршрут. Маршруты построены ' + DATA.made + ' от хаба (BRouter, «Без горок»); откуда ты ехал на самом деле, приложение не записывало. Файл личный: в нём адреса клиентов.'));
+  } else if (tab === 'learn') {
+    body.append(el('p', null, 'Направления, куда ездишь чаще всего (адреса в пределах ~400 м — одно направление). Путь до типичного адреса и обратно в хаб — по улицам. Нажми — покажу на карте: туда жёлтым, обратно зелёным пунктиром.'));
+    DATA.learn.forEach(function (d, n) {
+      var key = 'learn' + n;
+      var on = highlight && highlight.key === key;
+      var card = el('div', 'learn' + (on ? ' on' : ''));
+      var head = el('button', 'learn-head');
+      head.append(el('b', null, (n + 1) + '. ' + d.title), el('span', 'val', d.count + ' заказов · ' + Math.round(d.count / DATA.points.length * 100) + ' %'));
+      head.append(el('span', 'learn-streets', d.streets.join(', ')));
+      head.onclick = function () {
+        if (on) { highlight = null; paintAll(); return; }
+        selected = null; shift = null;
+        highlight = { key: key, lines: [d.to.line], back: d.back ? [d.back.line] : [], idx: d.idx, keepRoutes: true };
+        paintAll();
+        fitTo(d.to.line.concat(d.back ? d.back.line : []));
+      };
+      card.append(head);
+      if (on) {
+        [['Туда', d.to], ['Обратно в хаб', d.back]].forEach(function (part) {
+          if (!part[1]) return;
+          card.append(el('div', 'learn-sub', part[0] + ' · ' + fmt(part[1].km) + ' км · ~' + part[1].min + ' мин'));
+          var ol = el('ol', 'steps');
+          part[1].steps.forEach(function (s) {
+            var li = el('li');
+            li.append(el('span', 'arrow', ARROWS[s.turn] || '•'), el('span', 'what', (s.turn ? s.turn + ' — ' : (part[0] === 'Туда' ? 'от хаба — ' : 'от адреса — ')) + s.name), el('span', 'len', s.m >= 1000 ? fmt(s.m / 1000) + ' км' : s.m + ' м'));
+            ol.append(li);
+          });
+          card.append(ol);
+        });
+      }
+      body.append(card);
+    });
+    body.append(el('p', null, 'Путь — от хаба до адреса в середине направления; к соседним адресам последние улицы отличаются. Названия улиц — из OSM; короткие куски (до 50 м) не показаны.'));
   } else if (tab === 'paths') {
     body.append(el('p', null, 'Улицы, по которым маршруты от хаба проходят чаще всего (засчитано, если по улице не меньше 80 м). Название — по ближайшим домам, на перекрёстках возможны неточности.'));
     body.append(rows(DATA.paths, DATA.paths[0] ? DATA.paths[0].count : 1,
@@ -531,7 +641,7 @@ function renderSel(info) {
 function paintAll() { renderTabs(); renderBody(); paintMap(); renderSel(); }
 
 map.on('load', function () {
-  ['routes', 'points', 'hl', 'hl-points', 'heat'].forEach(function (id) { map.addSource(id, { type: 'geojson', data: fc([]) }); });
+  ['routes', 'points', 'hl', 'hl-back', 'hl-points', 'heat'].forEach(function (id) { map.addSource(id, { type: 'geojson', data: fc([]) }); });
   map.getSource('heat').setData(fc(heatFeatures()));
   map.addSource('hub', { type: 'geojson', data: fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [DATA.hub.lon, DATA.hub.lat] } }]) });
   // Популярность: число маршрутов на отрезке → цвет (одна шкала синего) и толщина.
@@ -540,6 +650,8 @@ map.on('load', function () {
       'line-width': ['interpolate', ['linear'], ['zoom'], 11, ['interpolate', ['linear'], ['get', 'n'], 1, 1.2, 40, 5], 16, ['interpolate', ['linear'], ['get', 'n'], 1, 3, 40, 12]] } }, 'street-name');
   map.addLayer({ id: 'routes', type: 'line', source: 'routes', layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '${C.route}', 'line-opacity': 0.28, 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2, 16, 5] } }, 'street-name');
+  map.addLayer({ id: 'hl-back', type: 'line', source: 'hl-back', layout: { 'line-cap': 'butt', 'line-join': 'round' },
+    paint: { 'line-color': '${C.cycle}', 'line-dasharray': [1.5, 1.2], 'line-offset': ['interpolate', ['linear'], ['zoom'], 11, 3, 16, 7], 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 3, 16, 5] } }, 'street-name');
   map.addLayer({ id: 'hl-casing', type: 'line', source: 'hl', layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#04141d', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 7, 16, 12] } }, 'street-name');
   map.addLayer({ id: 'hl', type: 'line', source: 'hl', layout: { 'line-cap': 'round', 'line-join': 'round' },

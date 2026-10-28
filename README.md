@@ -55,7 +55,7 @@ node tools/build-addresses.mjs   # скачивает из Overpass → data/add
 | `js/stats.js` | Статистика по журналу поездок |
 | `js/geocode.js` | Координаты адреса по офлайн-базе OSM |
 | `profiles/flink-*.brf` | Свои профили BRouter (стандартные с правкой про `bicycle=use_sidepath`; в `flink-fastbike` и `flink-easy` пешеходные зоны и дорожки парков с разрешением для велосипеда не дороже велодорожки; `flink-easy` — «Без горок», со штрафом за уклон круче 3 %); собираются `tools/build-profiles.mjs` |
-| `tools/build-private-map.mjs` | Личная карта всех адресов и маршрутов из резервной копии → `private/` (не в git) |
+| `tools/build-private-map.mjs`, `tools/frequent-routes.mjs` | Личная карта из резервных копий → `private/` (не в git): адреса, популярность путей, статистика, шпаргалка частых маршрутов (`chastye-marshruty.txt`) |
 | `js/address.js` | Разбор адреса из Flink, поиск |
 | `js/db.js` | Локальное хранилище: адреса и журнал поездок |
 | `sw.js` | Офлайн-кэш |
