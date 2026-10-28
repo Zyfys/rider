@@ -84,7 +84,7 @@ export function buildStyle(theme = 'dark') {
       { id: 'bg', type: 'background', paint: { 'background-color': COLORS.bg } },
       { id: 'water', type: 'fill', source: 'osm', 'source-layer': 'water', paint: { 'fill-color': COLORS.water } },
 
-      // Пешеходные зоны (Prager Straße, Altmarkt, Hauptstraße) — полупрозрачная красная заливка.
+      // Пешеходные зоны — полупрозрачная красная заливка (только для ориентира, предупреждений нет).
       { id: 'ped-area', type: 'fill', source: 'osm', 'source-layer': 'transportation',
         filter: ['all', POLY, ['==', ['get', 'subclass'], 'pedestrian']],
         paint: { 'fill-color': COLORS.pedestrian, 'fill-opacity': COLORS.pedOpacity } },

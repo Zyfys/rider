@@ -161,6 +161,9 @@ try {
   assert((await said())[0].startsWith('Маршрут построен'), 'route summary spoken');
   assert(brouter.lastUpload.includes('bicycle=use_sidepath') && brouter.lastUpload.includes('0.3'), 'custom BRouter profile (use_sidepath fix) is uploaded');
   assert(/assign uphillcost\s+= 300 /.test(brouter.lastUpload) && /assign uphillcutoff\s+= 3 /.test(brouter.lastUpload), 'after the update the profile is switched to «Без горок» once (uphill penalty)');
+  assert(brouter.lastUpload.includes('switch or hascycleway bicycle=yes|designated 1.3 3') && brouter.lastUpload.includes('surface=compacted|fine_gravel 1.5 3'),
+    'profile lets the route use pedestrian zones and park paths where bikes are allowed');
+  assert(!/Пешеходная зона/.test(await text()), 'no pedestrian-zone banner');
   assert(brouter.profiles[0] === 'custom_test1' && brouter.profiles[1] === 'custom_test2' && brouter.uploads === 2,
     'route uses the custom profile; when the server forgot it, the app re-uploads and retries');
   assert(/проехал 0 м[\s\S]*осталось 2,3 км/.test(await text()), 'progress bar shows 0 done / 2,3 km left');
@@ -219,6 +222,10 @@ try {
   assert(T.find((x) => x.kind === 'hub')?.arrivedAt > 0, 'arrival recorded in the journal');
 
   // ---------- Маршрут к адресу: запись в журнал ----------
+  // Сначала убираем маршрут: на пустой карте открытие вкладки раньше «восстанавливало» маршрут
+  // и стирало отметку о новой поездке — поездка к клиенту не записывалась.
+  await page.click('button[aria-label="Убрать маршрут"]');
+  await sleep(300);
   await page.setGeolocation({ latitude: route[0][1], longitude: route[0][0] });
   await clickText('.nav-btn', 'Адреса');
   await clickText('.addr-card', 'Wilsdruffer Straße 4');

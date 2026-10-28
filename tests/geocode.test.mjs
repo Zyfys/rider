@@ -47,3 +47,8 @@ test('extra word before the street name is skipped', () => {
   const direct = lookup(index, { street: 'Rosmaringasse', house: '5', zip: '01067' });
   assert.deepEqual([r.lat, r.lon], [direct.lat, direct.lon]);
 });
+
+test('«Sankt Petersburger Straße» from Flink is found as «St. Petersburger Straße» in OSM', () => {
+  const r = lookup(index, { street: 'Sankt Petersburger Straße', house: '25', zip: '01069' });
+  assert.ok(r && !r.approx, JSON.stringify(r));
+});

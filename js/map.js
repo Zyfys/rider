@@ -17,7 +17,6 @@ export const nav = {
   me: null,           // { lat, lon, acc }
   gps: 'waiting',     // waiting | ok | denied | unavailable
   follow: true,
-  inPedZone: false,
   dest: null,         // { lat, lon, approx }
   route: null,        // { length, time, fromHub, ascent — набор высоты в метрах, climbs — подъёмы (elevation.js) }
   routeState: 'idle', // idle | loading | ok | offline | error
@@ -127,7 +126,6 @@ function startGps() {
     // followZoom — куда приближаемся после нажатия ◎. Без него новое положение GPS прерывало бы
     // анимацию приближения, и карта оставалась бы отдалённой.
     if (nav.follow && !nav.picking) map.easeTo({ center: [nav.me.lon, nav.me.lat], zoom: followZoom ?? map.getZoom(), duration: first ? 0 : 600 });
-    checkPedZone();
     if (guide && !nav.picking) {
       const r = step(guide, [nav.me.lon, nav.me.lat], nav.speed == null ? null : nav.speed / 3.6);
       nav.next = r.next;
@@ -140,13 +138,6 @@ function startGps() {
     nav.gps = err.code === 1 ? 'denied' : 'unavailable';
     emit();
   }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
-}
-
-// Стою ли я в пешеходной зоне — проверяем по отрисованному слою под своей точкой.
-function checkPedZone() {
-  if (!nav.me || !map.getLayer('ped-area')) return;
-  const px = map.project([nav.me.lon, nav.me.lat]);
-  nav.inPedZone = map.queryRenderedFeatures([[px.x - 2, px.y - 2], [px.x + 2, px.y + 2]], { layers: ['ped-area'] }).length > 0;
 }
 
 function waitForFix(ms) {
@@ -163,9 +154,10 @@ function waitForFix(ms) {
 
 // Стандартные велопрофили BRouter считают участок с bicycle=use_sidepath закрытым и, если велодорожка
 // рядом не нанесена на карту, ведут в объезд. В profiles/flink-*.brf это правило исправлено.
-// Профиль «Без горок» (flink-easy) вдобавок штрафует уклоны круче 3 % и ведёт более пологой дорогой.
+// В «Быстром» и «Без горок» вдобавок пешеходные зоны и дорожки парков, где велосипед разрешён, не дороже
+// велодорожки. «Без горок» (flink-easy) ещё штрафует уклоны круче 3 % и ведёт более пологой дорогой.
 // Профиль загружается на сервер BRouter (в нём нет личных данных), сервер возвращает его временный id.
-const PROFILE_VERSION = 1; // увеличить при изменении profiles/*.brf
+const PROFILE_VERSION = 2; // увеличить при изменении profiles/*.brf
 const PROFILE_TTL = 12 * 3600 * 1000;
 
 async function customProfileId(profile, force = false) {

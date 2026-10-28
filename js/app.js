@@ -8,7 +8,7 @@ import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 import { worstClimb } from './elevation.js';
 
-const APP_VERSION = '1.11.1';
+const APP_VERSION = '1.12.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -212,13 +212,20 @@ async function ensureCoords(a) {
 
 // opts.log — поездку начал сам пользователь (кнопкой), её надо записать в журнал.
 // Перестроения и восстановление маршрута после перезапуска вызываются без log.
+// starting — маршрут уже начали строить: открытие карты не должно «восстанавливать» его второй раз.
+// (Раньше восстановление срабатывало, стирало отметку о новой поездке, и поездки к клиентам
+// не попадали в журнал, если перед этим маршрута на карте не было.)
+let starting = false;
 async function showRoute(a, opts = {}) {
   pendingTrip = opts.log ? a.id : null;
   state.routeTo = a.id;
   store.set('routeTo', a.id);
   setCurrent(a.id);
-  if (state.tab !== 'map') go('map');
-  await mapView.getMapElement();
+  starting = true;
+  try {
+    if (state.tab !== 'map') go('map');
+    await mapView.getMapElement();
+  } finally { starting = false; }
 
   let found;
   try { found = await ensureCoords(a); } catch { toast('Не удалось загрузить базу адресов'); return; }
@@ -253,8 +260,11 @@ async function showHub(opts = {}) {
   pendingTrip = opts.log ? HUB_ID : null;
   state.routeTo = HUB_ID;
   store.set('routeTo', HUB_ID);
-  if (state.tab !== 'map') go('map');
-  await mapView.getMapElement();
+  starting = true;
+  try {
+    if (state.tab !== 'map') go('map');
+    await mapView.getMapElement();
+  } finally { starting = false; }
   mapView.routeTo({ lat: HUB.lat, lon: HUB.lon, approx: false }, state.profile);
 }
 
@@ -307,8 +317,9 @@ async function migrate() {
     let dirty = false;
     // Flink дописывает город второй раз («…, 01069 Dresden, Dresden») — раньше он попадал в комментарий.
     if (a.comment && isNoise(a.comment, a.city)) { a.comment = ''; dirty = true; }
-    // Адрес не нашёлся на карте — разбираем заново: номер квартиры мог прилипнуть к номеру дома.
-    if (!a.lat) {
+    // Адрес не нашёлся на карте или в названии улицы есть цифры — разбираем заново:
+    // номер квартиры мог прилипнуть к номеру дома («Lindenweg 4/ Appt 310»).
+    if (!a.lat || /\d/.test(a.street)) {
       const p = parseAddress(`${a.street} ${a.house}`);
       if (p.street && p.house && (p.street !== a.street || p.house !== a.house)) {
         a.street = p.street;
@@ -427,7 +438,6 @@ function renderMap() {
       banners.push(h('div', { class: 'map-banner info' }, isHub ? '👆 Нажми на карте, где вход в хаб' : '👆 Нажми на карте, где вход',
         h('button', { class: 'btn btn-ghost banner-btn', onclick: () => mapView.cancelPick() }, 'Отмена')));
     }
-    if (nav.inPedZone) banners.push(h('div', { class: 'map-banner warn' }, '🚶 Пешеходная зона — веди велосипед рядом'));
     if (nav.gps === 'denied') banners.push(h('div', { class: 'map-banner warn' }, 'GPS запрещён. Разреши геолокацию для этого сайта в настройках Chrome.'));
 
     let card;
@@ -507,7 +517,7 @@ function renderMap() {
     wrap.prepend(el);
     mapView.resize();
     // Маршрут выбран раньше (например, до перезапуска приложения), но ещё не построен.
-    if (!mapView.nav.dest && mapView.nav.routeState === 'idle') {
+    if (!starting && !mapView.nav.dest && mapView.nav.routeState === 'idle') {
       const a = state.addresses.find((x) => x.id === state.routeTo);
       if (state.routeTo === HUB_ID) showHub();
       else if (a) showRoute(a);

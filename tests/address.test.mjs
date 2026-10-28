@@ -48,6 +48,16 @@ test('apartment number after the house number goes to the notes', () => {
   assert.equal(parseAddress('Zinzendorfstraße 4').street, 'Zinzendorfstraße');
 });
 
+test('apartment after a slash: «4/ Appt 310»', () => {
+  const r = parseAddress('Lindenweg 4/ Appt 310, 01069 Dresden');
+  assert.deepEqual([r.street, r.house, r.extra], ['Lindenweg', '4', 'Appt 310']);
+});
+
+test('Sankt and St. are the same street', () => {
+  assert.equal(addressKey('Sankt Petersburger Straße', '25'), addressKey('St. Petersburger Straße', '25'));
+  assert.equal(addressKey('St Petersburger Str', '25'), addressKey('St. Petersburger Straße', '25'));
+});
+
 test('Platz and Pl. are the same street', () => {
   assert.equal(addressKey('Fetscherplatz', '2'), addressKey('Fetscherpl.', '2'));
   assert.equal(addressKey('Schillerplatz', '9'), addressKey('Schillerpl', '9'));

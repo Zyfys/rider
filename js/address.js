@@ -5,7 +5,9 @@
 export function norm(s, collapseStreet = true) {
   const t = (s || '')
     .toLowerCase()
-    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss');
+    .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
+    // Flink пишет «Sankt Petersburger Straße», в OSM — «St. Petersburger Straße».
+    .replace(/\bsankt\b/g, 'st');
   return (collapseStreet ? t.replace(/strasse\b|str\b\.?/g, 'str').replace(/platz\b|pl\b\.?/g, 'pl') : t).replace(/[^a-z0-9а-яё]/g, '');
 }
 
@@ -16,8 +18,8 @@ export function addressKey(street, house) {
 const HOUSE = String.raw`\d+\s*[a-zA-Z]?(?:\s*[-–/]\s*\d+\s*[a-zA-Z]?)?`;
 const STREET_HOUSE = new RegExp(String.raw`^(.*?\D)\s*(${HOUSE})$`);
 const ZIP_CITY = /\b(\d{5})\s*([A-Za-zÄÖÜäöüß .-]*)/;
-// Номер квартиры после дома: «Grunaer Straße 12 Apt 034», «… Whg. 12».
-const APARTMENT = /\s+((?:apt|app|apartment|appartement|whg|wohnung|we|zi|zimmer)\b\.?\s*\S+)$/i;
+// Номер квартиры после дома: «Grunaer Straße 12 Apt 034», «… Whg. 12», «… 4/ Appt 310».
+const APARTMENT = /\s+((?:apt|app|appt|apartment|appartement|whg|wohnung|we|zi|zimmer)\b\.?\s*\S+)$/i;
 // Город/земля/страна, которые Flink дописывает после индекса («…, 01069 Dresden, Dresden») — в заметки не нужны.
 const NOISE = new Set(['dresden', 'дрезден', '드레스덴', 'sachsen', 'saxony', 'саксония', 'deutschland', 'germany', 'германия']);
 
@@ -46,9 +48,10 @@ export function parseAddress(text) {
   for (let p of parts) {
     if (!out.street) {
       const apt = p.match(APARTMENT);
-      if (apt && STREET_HOUSE.test(p.slice(0, apt.index))) {
+      const before = apt ? p.slice(0, apt.index).replace(/\s*[/,–-]\s*$/, '') : '';
+      if (apt && STREET_HOUSE.test(before)) {
         extras.push(apt[1]);
-        p = p.slice(0, apt.index);
+        p = before;
       }
       const m = p.match(STREET_HOUSE);
       if (m && /[A-Za-zÄÖÜäöüß]/.test(m[1])) {

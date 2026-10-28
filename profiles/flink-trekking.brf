@@ -1,4 +1,4 @@
-# Flink Helper: профиль BRouter «trekking» с одной правкой.
+# Flink Helper: профиль BRouter «trekking» с правками.
 # Источник: https://brouter.de/brouter/profiles2/trekking.brf (BRouter, лицензия MIT).
 # Правка — в accesspenalty: участок с bicycle=use_sidepath («езжай по велодорожке рядом»)
 # считается проезжим с небольшим штрафом 0.3, а не закрытым. Иначе там, где сама велодорожка
