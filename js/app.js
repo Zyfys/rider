@@ -8,7 +8,7 @@ import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 import { worstClimb } from './elevation.js';
 
-const APP_VERSION = '1.12.2';
+const APP_VERSION = '1.13.0';
 
 // ---------- Мелкие помощники ----------
 
@@ -119,6 +119,7 @@ const state = {
   voice: store.get('voice', true),
   theme: store.get('theme', 'dark'),
   profile: store.get('profile', 'easy'),
+  arrival: null, // id адреса, у которого только что «Вы на месте» — показываем карточку быстрой заметки
 };
 
 // Профиль «Без горок» появился в версии 1.11 — один раз включаем его и тем, у кого был выбран другой.
@@ -218,6 +219,7 @@ async function ensureCoords(a) {
 let starting = false;
 async function showRoute(a, opts = {}) {
   pendingTrip = opts.log ? a.id : null;
+  if (opts.log) state.arrival = null;
   state.routeTo = a.id;
   store.set('routeTo', a.id);
   setCurrent(a.id);
@@ -258,6 +260,7 @@ const HUB_ID = 'hub';
 
 async function showHub(opts = {}) {
   pendingTrip = opts.log ? HUB_ID : null;
+  if (opts.log) state.arrival = null;
   state.routeTo = HUB_ID;
   store.set('routeTo', HUB_ID);
   starting = true;
@@ -306,7 +309,33 @@ async function markArrived() {
   const last = state.trips[state.trips.length - 1];
   if (!last || last.arrivedAt || last.target !== state.routeTo) return;
   last.arrivedAt = Date.now();
+  trackDirty = 0;
   await db.trips.put(last);
+}
+
+// ---------- Трек поездки: где ехал на самом деле ----------
+
+// Точки GPS пишутся в текущую поездку — от начала до приезда и ещё 3 минуты после (подход к двери).
+// Хранятся только на телефоне, вместе с журналом попадают в экспорт. По ним видно, где маршрут
+// неудобный (ехал иначе) и сколько времени уходит у двери.
+const TRACK_STEP_M = 12;
+const TRACK_MAX_MS = 90 * 60 * 1000;
+const TRACK_AFTER_MS = 3 * 60 * 1000;
+let trackDirty = 0;
+let trackTimer;
+function recordFix(f) {
+  const t = state.trips[state.trips.length - 1];
+  if (!t || t.estimated || t.target !== state.routeTo || f.acc > 50) return;
+  if (f.t - t.ts > TRACK_MAX_MS || (t.arrivedAt && f.t - t.arrivedAt > TRACK_AFTER_MS)) return;
+  t.track ||= [];
+  const p = [+f.lon.toFixed(5), +f.lat.toFixed(5), Math.max(0, Math.round((f.t - t.ts) / 1000))];
+  const last = t.track[t.track.length - 1];
+  if (last && distance(last, p) < TRACK_STEP_M) return;
+  t.track.push(p);
+  // Пишем в базу пачками: каждые 10 точек или через 20 секунд после последней.
+  clearTimeout(trackTimer);
+  if (++trackDirty >= 10) { trackDirty = 0; db.trips.put(t).catch(() => {}); }
+  else trackTimer = setTimeout(() => { trackDirty = 0; db.trips.put(t).catch(() => {}); }, 20000);
 }
 
 // ---------- Обновление старых данных ----------
@@ -365,7 +394,11 @@ mapView.onGuide((e) => {
     if (state.voice) speakRu(summary(e.routeReady.length, e.routeReady.time, e.routeReady.climbs));
   }
   if (e.say && state.voice) e.say.forEach(speakRu);
-  if (e.say?.includes('Вы на месте')) markArrived().catch(() => {});
+  if (e.say?.includes('Вы на месте')) {
+    markArrived().catch(() => {});
+    if (state.routeTo && state.routeTo !== HUB_ID) state.arrival = state.routeTo;
+  }
+  if (e.fix) recordFix(e.fix);
   if (e.offRoute && Date.now() - lastReroute > 30000) {
     lastReroute = Date.now();
     if (state.voice) speakRu('Вы ушли с маршрута. Перестраиваю.');
@@ -406,6 +439,56 @@ const fmtKm = (m) =>
  (m < 1000 ? `${Math.round(m / 10) * 10} м` : `${(m / 1000).toFixed(1).replace('.', ',')} км`);
 const fmtMin = (s) => `~${Math.max(1, Math.round(s / 60))} мин`;
 
+// Сколько раз возил на этот адрес раньше (по журналу, без текущей поездки).
+function pastVisits(id) {
+  const list = state.trips.filter((t) => t.target === id);
+  const last = state.trips[state.trips.length - 1];
+  const current = last && last.target === id && !last.estimated && Date.now() - last.ts < TRACK_MAX_MS;
+  return current ? list.length - 1 : list.length;
+}
+
+// Карточка «На месте»: код, этаж, вход и пометки одним нажатием, пока стоишь у двери.
+// В следующий раз всё это покажется в карточке маршрута ещё в пути.
+const ENTRANCE_CHIPS = ['со двора', 'через арку', 'с торца', 'вход сбоку'];
+function arrivalCard(a, close) {
+  const save = debounce(() => saveAddress(a), 400);
+  const visits = pastVisits(a.id);
+  const notes = h('div', { class: 'arr-notes' });
+  const showNotes = () => notes.replaceChildren(...[a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ') || '');
+  const input = (name, label, inputmode) => h('label', { class: 'arr-field' }, h('span', {}, label),
+    h('input', { value: a[name] || '', inputmode, autocomplete: 'off', spellcheck: 'false',
+      oninput: (e) => { a[name] = e.target.value; showNotes(); save(); } }));
+  const chips = [];
+  const chip = (text, isOn, toggle, cls = '') => {
+    const b = h('button', { class: 'arr-chip ' + cls, onclick: () => { toggle(); refresh(); showNotes(); saveAddress(a); } }, text);
+    chips.push([b, isOn]);
+    return b;
+  };
+  const refresh = () => chips.forEach(([b, isOn]) => b.classList.toggle('on', isOn()));
+  const hasPart = (p) => (a.entrance || '').split(', ').includes(p);
+  const togglePart = (p) => {
+    const parts = (a.entrance || '').split(', ').filter(Boolean);
+    a.entrance = (hasPart(p) ? parts.filter((x) => x !== p) : [...parts, p]).join(', ');
+  };
+  const card = h('div', { class: 'arrive' },
+    h('div', { class: 'arr-head' },
+      h('b', {}, `📍 На месте · ${a.street} ${a.house}`),
+      visits > 0 ? h('span', { class: 'muted' }, ` · уже ${visits + 1}-й раз`) : null),
+    notes,
+    h('div', { class: 'arr-row' }, input('intercom', 'Код', 'text'), input('floor', 'Этаж', 'numeric')),
+    h('div', { class: 'arr-chips' },
+      ENTRANCE_CHIPS.map((p) => chip(p, () => hasPart(p), () => togglePart(p))),
+      chip('лифт есть', () => a.elevator === 'yes', () => { a.elevator = a.elevator === 'yes' ? null : 'yes'; }),
+      chip('лифта нет', () => a.elevator === 'no', () => { a.elevator = a.elevator === 'no' ? null : 'no'; })),
+    h('div', { class: 'arr-chips' }, MARKS.map((m) => chip(m.label, () => a.mark === m.id, () => { a.mark = a.mark === m.id ? null : m.id; }, 'mark-chip seg-' + m.id))),
+    h('div', { class: 'arr-row' },
+      h('button', { class: 'btn', onclick: () => close() }, '✓ Готово'),
+      h('button', { class: 'btn arr-hub', onclick: () => { close(); showHub({ log: true }); } }, '🏠 В хаб')));
+  refresh();
+  showNotes();
+  return card;
+}
+
 // Строка о самом тяжёлом подъёме из тех, что ещё впереди. На быстром профиле крутой подъём можно объехать.
 function climbLine(nav, reroute) {
   if (nav.routeState !== 'ok' || !nav.route) return null;
@@ -427,6 +510,11 @@ function renderMap() {
   const speedEl = h('div', { class: 'speed', hidden: true, 'aria-label': 'Скорость' });
   const progressEl = h('div', { class: 'route-progress', hidden: true });
   wrap.append(top, fabs, hubBtn, speedEl, progressEl);
+  // Карточка «На месте» живёт отдельно от остального: её поля не пересоздаются на каждой точке GPS,
+  // иначе пропадал бы курсор, пока вводишь код.
+  let arriveEl = null;
+  let arriveFor = null;
+  const closeArrival = () => { state.arrival = null; paint(mapView.nav); };
 
 
   const paint = (nav) => {
@@ -460,11 +548,13 @@ function renderMap() {
               h('span', { class: 'mark mark-' + (a.mark || 'none'), 'aria-hidden': 'true' }),
               h('span', { class: 'addr-main' }, `${a.street} ${a.house}`)),
           h('button', { class: 'btn btn-icon btn-ghost', 'aria-label': 'Убрать маршрут', onclick: () => {
-            state.routeTo = null; store.set('routeTo', null); mapView.clearRoute(); keepAwake(false); paint(mapView.nav);
+            state.routeTo = null; state.arrival = null; store.set('routeTo', null); mapView.clearRoute(); keepAwake(false); paint(mapView.nav);
           } }, '✕')),
         status ? h('div', { class: 'map-status' }, status) : null,
         climbLine(nav, reroute),
         a && (a.intercom || a.floor || a.entrance) ? h('div', { class: 'addr-hint' }, [a.intercom && `🔢 ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance].filter(Boolean).join(' · ')) : null,
+        a && pastVisits(a.id) > 0 ? h('div', { class: 'map-visits' }, [`↺ раньше возил сюда: ${pastVisits(a.id)} ${plural(pastVisits(a.id), 'раз', 'раза', 'раз')}`,
+          a.elevator === 'no' && 'лифта нет', a.mark === 'red' && '⚠ проблемный'].filter(Boolean).join(' · ')) : null,
         a?.geoApprox ? h('div', { class: 'map-approx' }, '⚠️ Точка примерная — поставь вход 📌') : null,
 
         // Во время езды (карта следует за мной) карточка компактная, чтобы не закрывать карту.
@@ -480,6 +570,14 @@ function renderMap() {
     top.replaceChildren(...[turnPanel(nav), card, ...banners].filter(Boolean));
 
     hubBtn.hidden = isHub || nav.picking;
+    const arrA = state.arrival ? state.addresses.find((x) => x.id === state.arrival) : null;
+    if ((arrA?.id || null) !== arriveFor) {
+      arriveEl?.remove();
+      arriveEl = arrA ? arrivalCard(arrA, closeArrival) : null;
+      arriveFor = arrA?.id || null;
+      if (arriveEl) wrap.append(arriveEl);
+    }
+    wrap.classList.toggle('arriving', !!arriveEl);
     // Полоса прогресса маршрута: сколько проехал и сколько осталось.
     const pr = nav.routeState === 'ok' ? nav.progress : null;
     wrap.classList.toggle('has-progress', !!pr);
@@ -973,7 +1071,7 @@ function openSettings() {
   openSheet('Данные и настройки', h('div', { class: 'screen' },
     h('div', { class: 'info-box' },
       h('strong', {}, `Адресов в базе: ${state.addresses.length} · поездок в журнале: ${state.trips.length}`),
-      h('p', {}, 'Адреса, коды и заметки хранятся только на этом телефоне и никуда не отправляются.'),
+      h('p', {}, 'Адреса, коды, заметки и журнал поездок (с треком — где ехал) хранятся только на этом телефоне и никуда не отправляются.'),
       h('p', {}, 'Для карты в интернет уходят только: запросы кусочков карты (OpenFreeMap) и координаты начала и конца маршрута и правила построения маршрута (BRouter) — без адреса и заметок. Поиск адреса работает на телефоне.'),
 
     ),

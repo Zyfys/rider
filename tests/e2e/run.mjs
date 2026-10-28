@@ -110,7 +110,8 @@ try {
   // ---------- Импорт старой резервной копии (формат до 1.9) и обновление данных ----------
   const day = 86400000;
   const old = (i, street, house, zip, daysAgo, hour, extra = {}) => {
-    const t = new Date(Date.now() - daysAgo * day); t.setHours(hour, 10 + i, 0, 0);
+    // +1 день: адрес без маршрута попадает в статистику через 3 часа — тест не должен зависеть от времени запуска.
+    const t = new Date(Date.now() - (daysAgo + 1) * day); t.setHours(hour, 10 + i, 0, 0);
     return { id: `old${i}`, key: 'x', street, house, zip, city: 'Dresden', intercom: '', floor: '', entrance: '', bikeParking: '', elevator: '', comment: 'Dresden', mark: null, createdAt: t.getTime(), lastUsedAt: t.getTime(), ...extra };
   };
   const backup = { app: 'flink-helper', version: '1.8.0', addresses: [
@@ -220,6 +221,9 @@ try {
   assert(progress.length > 3 && new Set(progress).size > 3, 'progress bar moves while riding');
   T = await trips();
   assert(T.find((x) => x.kind === 'hub')?.arrivedAt > 0, 'arrival recorded in the journal');
+  const hubTrack = T.find((x) => x.kind === 'hub')?.track || [];
+  assert(hubTrack.length > 100 && hubTrack.every((p) => p.length === 3), `GPS track recorded for the trip (${hubTrack.length} points)`);
+  assert(!/На месте ·/.test(await text()), 'no «На месте» note card for the hub');
 
   // ---------- Маршрут к адресу: запись в журнал ----------
   // Сначала убираем маршрут: на пустой карте открытие вкладки раньше «восстанавливало» маршрут
@@ -238,6 +242,32 @@ try {
   await waitText(/Wilsdruffer Straße 4[\s\S]*(км|м) · ~\d+ мин/);
   await sleep(500);
   assert((await trips()).length === 9, 'restoring the route after restart is not a new trip');
+
+  // ---------- «На месте»: быстрая заметка у двери ----------
+  for (const [lon, lat] of pts.slice(-40)) {
+    await page.setGeolocation({ latitude: lat, longitude: lon });
+    await sleep(60);
+    await page.evaluate(() => 0);
+  }
+  await waitText(/На месте · Wilsdruffer Straße 4/);
+  assert(/уже 2-й раз/.test(await text()), 'arrival card says this is a repeat visit');
+  await page.type('.arrive .arr-field input', '4711');
+  await clickText('.arrive .arr-chip', 'со двора');
+  await clickText('.arrive .arr-chip', 'лифта нет');
+  await clickText('.arrive .arr-chip', 'Простой');
+  // Новые точки GPS перерисовывают карту — поле ввода не должно терять текст и курсор.
+  await page.setGeolocation({ latitude: pts.at(-1)[1] + 0.00001, longitude: pts.at(-1)[0] });
+  await sleep(800);
+  assert(await page.evaluate(() => document.activeElement?.closest?.('.arrive') != null || document.querySelector('.arrive input').value === '4711'), 'note card survives GPS updates');
+  await sleep(600);
+  let W = (await addresses()).find((a) => a.id === 'old7');
+  assert(W.intercom === '4711' && W.entrance === 'со двора' && W.elevator === 'no' && W.mark === 'green', 'quick note saved to the address');
+  assert(/🔢 4711 · со двора/.test(await text()), 'saved note shown big on the card');
+  await clickText('.arrive button', 'Готово');
+  assert(!/На месте ·/.test(await text()), 'card closes with «Готово»');
+  assert(/↺ раньше возил сюда: 1 раз · лифта нет/.test(await text()), 'route card shows repeat visits and the note');
+  const addrTrip = (await trips()).filter((x) => x.target === 'old7').at(-1);
+  assert(addrTrip.arrivedAt > 0 && addrTrip.track?.length > 5, 'address trip: arrival and track recorded');
 
   // ---------- Вставленный адрес не разобрался — попадает в список «Не найденные адреса» ----------
   await clickText('.nav-btn', 'Адреса');

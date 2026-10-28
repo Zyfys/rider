@@ -437,6 +437,38 @@ main.is-map { position: relative; overflow: hidden; }
   cursor: pointer;
 }
 .hub-btn[hidden] { display: none; }
+
+/* Карточка «На месте» — внизу карты, под большим пальцем; на это время прячем кнопки внизу. */
+.arrive {
+  position: absolute;
+  left: 8px; right: 8px; bottom: 8px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.arriving .hub-btn, .arriving .map-fabs, .arriving .speed, .arriving .route-progress { display: none; }
+.arr-head { font-size: 15px; }
+.arr-notes { font-size: 20px; font-weight: 800; color: var(--accent); }
+.arr-notes:empty { display: none; }
+.arr-row { display: flex; gap: 8px; }
+.arr-row > * { flex: 1; }
+.arr-field { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.arr-field input { min-height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 20px; font-weight: 700; }
+.arr-field input:focus { border-color: var(--accent); outline: none; }
+.arr-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.arr-chip { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
+.arr-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.arr-chip.mark-chip.seg-green.on { background: var(--green); border-color: var(--green); color: #05170d; }
+.arr-chip.mark-chip.seg-yellow.on { background: var(--yellow); border-color: var(--yellow); color: #1a1405; }
+.arr-chip.mark-chip.seg-red.on { background: var(--red); border-color: var(--red); color: #1a0505; }
+.arr-hub { background: var(--green); border-color: var(--green); color: #05170d; font-weight: 800; }
+.map-visits { font-size: 13px; color: var(--muted); }
 .speed {
   position: absolute;
   left: 10px; bottom: 80px;

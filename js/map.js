@@ -54,7 +54,7 @@ let theme = 'dark';
 let guide = null;
 const FOLLOW_ZOOM = 16.5;
 let followZoom = null;
-// События для голоса: { say: [фразы] } | { routeReady: {length, time} } | { offRoute: true }
+// События: { say: [фразы] } | { routeReady: {length, time} } | { offRoute: true } | { fix: {lon, lat, acc, t} }
 let guideListener = () => {};
 export const onGuide = (fn) => { guideListener = fn; };
 
@@ -120,6 +120,8 @@ function startGps() {
     nav.me = { lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy };
     updateSpeed(p);
     nav.gps = 'ok';
+    // Каждая точка — приложению для записи трека поездки.
+    guideListener({ fix: { lon: nav.me.lon, lat: nav.me.lat, acc: nav.me.acc, t: p.timestamp || Date.now() } });
     await loaded;
     map.getSource('me').setData(fc([point(nav.me.lon, nav.me.lat)]));
     if (first) followZoom = Math.max(map.getZoom(), FOLLOW_ZOOM);
