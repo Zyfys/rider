@@ -1,6 +1,6 @@
 // Личная карта: все сохранённые адреса и маршруты к ним от хаба.
 //
-//   node tools/build-private-map.mjs копия1.json [копия2.json …] [lat,lon хаба]
+//   node tools/build-private-map.mjs копия1.json [копия2.json …] [lat,lon хаба] [--cached]
 //
 // Можно передать несколько резервных копий — адреса объединяются (одинаковые id считаются один раз).
 //
@@ -12,9 +12,12 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { buildStyle, THEMES } from '../js/map-style.js';
 import { buildIndex, lookup, HUB } from '../js/geocode.js';
-import { parseAddress, isNoise } from '../js/address.js';
+import { parseAddress, isNoise, norm } from '../js/address.js';
+import { DISTRICTS } from '../js/stats.js';
 
-const args = process.argv.slice(2);
+// --cached — не обращаться к серверу, взять только уже построенные маршруты (когда BRouter просит подождать).
+const onlyCached = process.argv.includes('--cached');
+const args = process.argv.slice(2).filter((a) => a !== '--cached');
 const hubArg = args.find((a) => /^\d+\.\d+,\d+\.\d+$/.test(a));
 const backupPaths = args.filter((a) => a !== hubArg);
 if (!backupPaths.length) { console.error('Укажи путь к файлу резервной копии'); process.exit(1); }
@@ -24,7 +27,8 @@ const seen = new Set();
 const backup = { addresses: backupPaths
   .flatMap((f) => JSON.parse(readFileSync(f, 'utf8').replace(/^\uFEFF/, '')).addresses)
   .filter((a) => !seen.has(a.id) && seen.add(a.id)) };
-const index = buildIndex(JSON.parse(readFileSync(new URL('../data/addresses-dresden.json', import.meta.url))));
+const addressData = JSON.parse(readFileSync(new URL('../data/addresses-dresden.json', import.meta.url)));
+const index = buildIndex(addressData);
 
 // Адреса: координаты из копии, а где их нет — ищем заново (с теми же исправлениями, что в приложении).
 const points = [];
@@ -45,7 +49,7 @@ for (const a of backup.addresses) {
   // Смена: всё, что после полуночи до 5 утра, относится к предыдущему дню.
   const shift = new Date(a.createdAt - 5 * 3600000);
   points.push({
-    label: `${street} ${house}`, zip: a.zip, lat, lon, approx,
+    label: `${street} ${house}`, street, house, zip: a.zip, lat, lon, approx,
     ts: a.createdAt,
     shift: shift.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }),
     note: [a.intercom && `код ${a.intercom}`, a.floor && `этаж ${a.floor}`, a.entrance, !isNoise(a.comment, a.city) && a.comment].filter(Boolean).join(' · '),
@@ -66,7 +70,7 @@ let built = 0;
 const PROFILE_TAG = 'flink-easy-2';
 const profileText = readFileSync(new URL('../profiles/flink-easy.brf', import.meta.url), 'utf8');
 async function uploadProfile() {
-  const res = await fetch('https://brouter.de/brouter/profile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: profileText });
+  const res = await fetch('https://brouter.de/brouter/profile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: profileText, signal: AbortSignal.timeout(30000) });
   if (!res.ok) throw new Error(`не удалось загрузить профиль: ${res.status}`);
   return (await res.json()).profileid;
 }
@@ -74,7 +78,7 @@ let profileId = null;
 for (const [i, p] of points.entries()) {
   const lonlats = `${hub.lon.toFixed(5)},${hub.lat.toFixed(5)}|${p.lon.toFixed(5)},${p.lat.toFixed(5)}`;
   const key = `${PROFILE_TAG}|${lonlats}`;
-  if (!cache[key]) {
+  if (!cache[key] && !onlyCached) {
     try {
       // Бесплатный сервер ограничивает частоту запросов: при отказе ждём и пробуем снова.
       let res;
@@ -108,13 +112,137 @@ console.log(`\nпостроено заново: ${built}, из кэша: ${point
 
 const withRoute = points.filter((p) => p.line);
 const totalKm = withRoute.reduce((s, p) => s + p.length, 0) / 1000;
+
+// ---------- Статистика для панели ----------
+
+const M_LAT = 111195;
+const M_LON = M_LAT * Math.cos(51.05 * Math.PI / 180);
+const meters = (a, b) => Math.hypot((a[0] - b[0]) * M_LON, (a[1] - b[1]) * M_LAT);
+
+// Популярность участков: сколько маршрутов проходит по каждому отрезку (туда и обратно — один отрезок).
+const segKey = (a, b) => { const x = a.join(','), y = b.join(','); return x < y ? `${x};${y}` : `${y};${x}`; };
+const segs = new Map();
+for (const p of withRoute) {
+  const used = new Set();
+  for (let i = 1; i < p.line.length; i++) {
+    const k = segKey(p.line[i - 1], p.line[i]);
+    if (used.has(k)) continue;
+    used.add(k);
+    const s = segs.get(k);
+    if (s) s.n++; else segs.set(k, { a: p.line[i - 1], b: p.line[i], n: 1 });
+  }
+}
+// Для карты: отрезки, сгруппированные по числу маршрутов.
+const heatBy = new Map();
+for (const s of segs.values()) {
+  if (!heatBy.has(s.n)) heatBy.set(s.n, []);
+  heatBy.get(s.n).push([s.a, s.b]);
+}
+const heat = [...heatBy].sort((a, b) => a[0] - b[0]).map(([n, lines]) => ({ n, lines }));
+
+// Название улицы для отрезка — по ближайшему дому из базы адресов OSM (в пределах 45 м).
+// Это приближение: на перекрёстках ближайший дом может стоять на поперечной улице, поэтому улица
+// засчитывается маршруту, только если он проехал по ней не меньше 80 м.
+const CELL = 0.001;
+const grid = new Map();
+for (const [key, list] of Object.entries(addressData)) {
+  const street = key.split('|')[0];
+  for (const [, lat, lon] of list) {
+    const c = `${Math.floor(lat / CELL)},${Math.floor(lon / CELL)}`;
+    if (!grid.has(c)) grid.set(c, []);
+    grid.get(c).push([lon, lat, street]);
+  }
+}
+function nearestStreet([lon, lat]) {
+  const ci = Math.floor(lat / CELL), cj = Math.floor(lon / CELL);
+  let best = null, bestD = 45;
+  for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) {
+    for (const h of grid.get(`${i},${j}`) || []) {
+      const d = meters(h, [lon, lat]);
+      if (d < bestD) { bestD = d; best = h[2]; }
+    }
+  }
+  return best;
+}
+const segStreet = new Map();
+for (const [k, s] of segs) segStreet.set(k, nearestStreet([(s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2]));
+
+const corridors = new Map(); // улица → { routes, m, keys }
+for (const p of withRoute) {
+  const perStreet = new Map();
+  for (let i = 1; i < p.line.length; i++) {
+    const k = segKey(p.line[i - 1], p.line[i]);
+    const street = segStreet.get(k);
+    if (!street) continue;
+    const e = perStreet.get(street) || { m: 0, keys: [] };
+    e.m += meters(p.line[i - 1], p.line[i]);
+    e.keys.push(k);
+    perStreet.set(street, e);
+  }
+  for (const [street, e] of perStreet) {
+    if (e.m < 80) continue;
+    const c = corridors.get(street) || { routes: 0, m: 0, keys: new Set() };
+    c.routes++;
+    c.m += e.m;
+    for (const k of e.keys) c.keys.add(k);
+    corridors.set(street, c);
+  }
+}
+const paths = [...corridors].sort((a, b) => b[1].routes - a[1].routes || b[1].m - a[1].m).slice(0, 20)
+  .map(([street, c]) => ({ label: street, count: c.routes, km: Math.round(c.m / 100) / 10, lines: [...c.keys].map((k) => [segs.get(k).a, segs.get(k).b]) }));
+
+// Куда: улицы и районы доставки (по точкам — каждая точка один заказ).
+function group(keyFn, labelFn) {
+  const g = new Map();
+  points.forEach((p, i) => {
+    const k = keyFn(p);
+    if (!k) return;
+    const e = g.get(k) || { label: labelFn(p), count: 0, idx: [] };
+    if (labelFn(p).length > e.label.length) e.label = labelFn(p);
+    e.count++;
+    e.idx.push(i);
+    g.set(k, e);
+  });
+  return [...g.values()].sort((a, b) => b.count - a.count);
+}
+const streets = group((p) => norm(p.street), (p) => p.street).slice(0, 20);
+const districts = group((p) => p.zip || '', (p) => (DISTRICTS[p.zip] ? `${DISTRICTS[p.zip]} (${p.zip})` : p.zip));
+const repeats = group((p) => norm(p.street) + '|' + norm(p.house), (p) => p.label).filter((g) => g.count > 1);
+
+// Время: часы, дни недели, смены (часовой пояс Дрездена).
+const berlin = (ts, opts) => new Date(ts).toLocaleString('ru-RU', { timeZone: 'Europe/Berlin', ...opts });
+const hours = Array(24).fill(0);
+const weekdays = Array(7).fill(0); // пн … вс
+for (const p of points) {
+  hours[+berlin(p.ts, { hour: '2-digit', hour12: false }) % 24]++;
+  const wd = new Date(p.ts - 5 * 3600000).toLocaleString('en-US', { timeZone: 'Europe/Berlin', weekday: 'short' });
+  weekdays[['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(wd)]++;
+}
+const shiftList = [];
+for (const p of points) {
+  let s = shiftList.find((x) => x.shift === p.shift);
+  if (!s) { s = { shift: p.shift, count: 0, km: 0, from: p.ts, to: p.ts }; shiftList.push(s); }
+  s.count++;
+  s.km += (p.length || 0) / 1000;
+  s.from = Math.min(s.from, p.ts);
+  s.to = Math.max(s.to, p.ts);
+}
+for (const s of shiftList) {
+  s.time = `${berlin(s.from, { hour: '2-digit', minute: '2-digit' })}–${berlin(s.to, { hour: '2-digit', minute: '2-digit' })}`;
+  s.km = Math.round(s.km * 10) / 10;
+  delete s.from; delete s.to;
+}
+
 const data = {
-  hub, points,
+  hub, points, heat, paths, streets, districts, repeats, hours, weekdays, shifts: shiftList,
   made: new Date().toLocaleDateString('ru-RU'),
-  summary: { count: points.length, routes: withRoute.length, totalKm, avgKm: totalKm / (withRoute.length || 1) },
+  summary: { count: points.length, routes: withRoute.length, totalKm, shifts: shiftList.length },
 };
 const C = THEMES.dark;
 const json = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
+
+// Последовательная шкала одного оттенка: редко — тёмно-синий у фона, часто — почти белый.
+const HEAT = ['#1c5cab', '#2a78d6', '#5598e7', '#86b6ef', '#cde2fb'];
 
 const html = `<!doctype html>
 <html lang="ru">
@@ -125,130 +253,324 @@ const html = `<!doctype html>
 <title>Мои адреса и маршруты</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <style>
-  html, body { margin: 0; height: 100%; background: ${C.bg}; color: #eef0f3; font: 15px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif; }
+  :root { --surface: rgba(24, 27, 32, .95); --line: #2f343c; --text: #eef0f3; --muted: #9aa3ad; --bar: #3987e5; --track: #22262d; --hl: ${C.approx}; }
+  html, body { margin: 0; height: 100%; background: ${C.bg}; color: var(--text); font: 15px/1.4 system-ui, 'Segoe UI', Roboto, sans-serif; }
   #map { position: absolute; inset: 0; }
-  .panel { position: absolute; top: 10px; left: 10px; z-index: 2; max-width: min(360px, calc(100% - 20px)); padding: 12px 14px; border: 1px solid #2f343c; border-radius: 14px; background: rgba(24, 27, 32, .94); box-shadow: 0 4px 16px rgba(0, 0, 0, .4); }
-  .panel h1 { margin: 0 0 2px; font-size: 18px; }
-  .panel p { margin: 4px 0; color: #9aa3ad; font-size: 13px; }
-  .big { display: flex; gap: 16px; margin: 8px 0; }
+  .panel { position: absolute; top: 10px; left: 10px; z-index: 2; width: min(380px, calc(100% - 20px)); max-height: calc(100% - 20px); display: flex; flex-direction: column; box-sizing: border-box; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgba(0, 0, 0, .4); }
+  .head { flex: none; padding: 12px 14px 0; }
+  .panel h1 { margin: 0; font-size: 18px; }
+  .tabs { flex: none; display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tabs button { flex: none; min-height: 34px; padding: 0 11px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-weight: 700; cursor: pointer; }
+  .tabs button.on { background: var(--track); color: var(--text); box-shadow: inset 0 0 0 2px var(--bar); }
+  .body { flex: 1 1 auto; min-height: 0; padding: 10px 14px 12px; overflow-y: auto; }
+  .body p { margin: 4px 0; color: var(--muted); font-size: 13px; }
+  .big { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 10px; }
   .big div { display: flex; flex-direction: column; }
-  .big b { font-size: 24px; line-height: 1.1; }
-  .big span { font-size: 12px; color: #9aa3ad; }
+  .big b { font-size: 22px; line-height: 1.1; }
+  .big span { font-size: 12px; color: var(--muted); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chips button { min-height: 36px; padding: 0 12px; border: 1px solid #2f343c; border-radius: 999px; background: #22262d; color: #eef0f3; font: inherit; font-weight: 600; cursor: pointer; }
+  .chips button { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--track); color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; }
   .chips button.on { background: ${C.route}; border-color: ${C.route}; color: #04141d; }
-  .sel { margin-top: 10px; padding-top: 8px; border-top: 1px solid #2f343c; }
-  .sel b { font-size: 17px; }
-  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; color: #9aa3ad; }
-  .legend i { display: inline-block; width: 18px; height: 4px; margin-right: 5px; border-radius: 2px; vertical-align: middle; }
-  .legend i.dot { width: 10px; height: 10px; border-radius: 50%; }
+  h2 { margin: 12px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .rows { display: flex; flex-direction: column; gap: 2px; }
+  .row { position: relative; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; min-height: 34px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+  .row:hover, .row.on { background: var(--track); }
+  .row.on { box-shadow: inset 3px 0 0 var(--hl); }
+  .row .bar { position: absolute; left: 8px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--bar); }
+  .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .row .val { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .row .val b { color: var(--text); }
+  .cols { display: flex; align-items: flex-end; gap: 3px; height: 110px; padding-top: 16px; }
+  .col { position: relative; flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+  .col i { display: block; width: 100%; max-width: 22px; border-radius: 4px 4px 0 0; background: var(--bar); }
+  .col i.zero { background: var(--track); height: 2px; border-radius: 1px; }
+  .col em { position: absolute; top: -16px; font-style: normal; font-size: 11px; color: var(--muted); }
+  .labels { display: flex; gap: 3px; margin-top: 4px; }
+  .labels span { flex: 1; text-align: center; font-size: 11px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  td, th { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+  td:first-child, th:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .ramp { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .ramp i { width: 16px; height: 6px; border-radius: 2px; }
+  .legend .dot { display: inline-block; width: 10px; height: 10px; margin-right: 4px; border-radius: 50%; vertical-align: middle; }
+  .sel { flex: none; margin: 0 14px 12px; padding: 8px 10px; border-radius: 10px; background: var(--track); font-size: 14px; }
+  .sel p { margin: 2px 0; color: var(--muted); font-size: 13px; }
+  .seg2 { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--track); }
+  .seg2 button { min-height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .seg2 button.on { background: #2f343c; color: var(--text); }
   .maplibregl-ctrl-attrib { font-size: 11px; }
-  details { margin-top: 8px; font-size: 13px; color: #9aa3ad; }
-  summary { cursor: pointer; min-height: 28px; }
+  @media (max-width: 600px) { .panel { max-height: 52%; } .big b { font-size: 19px; } }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div class="panel">
-  <h1>Мои адреса и маршруты</h1>
-  <div class="big">
-    <div><b id="n"></b><span>адресов</span></div>
-    <div><b id="km"></b><span>км от хаба в одну сторону</span></div>
-    <div><b id="avg"></b><span>км в среднем</span></div>
-  </div>
-  <div class="chips" id="chips"></div>
-  <div class="legend">
-    <span><i style="background:${C.route}"></i>маршрут от хаба (ярче — чаще)</span>
-    <span><i class="dot" style="background:#fff"></i>адрес</span>
-    <span><i style="background:${C.approx}"></i>выбранный маршрут</span>
-    <span><i class="dot" style="background:${C.cycle}"></i>хаб</span>
-  </div>
+  <div class="head"><h1>Мои адреса и маршруты</h1></div>
+  <div class="tabs" id="tabs"></div>
+  <div class="body" id="body"></div>
   <div class="sel" id="sel" hidden></div>
-  <details><summary>О карте</summary><p id="foot"></p></details>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
-const DATA = ${json(data)};
-const STYLE = ${json(buildStyle('dark'))};
-const fmt = (v) => v.toFixed(1).replace('.', ',');
-const fc = (features) => ({ type: 'FeatureCollection', features });
-const map = new maplibregl.Map({ container: 'map', style: STYLE, center: [DATA.hub.lon, DATA.hub.lat], zoom: 12.6, dragRotate: false, attributionControl: { compact: true } });
+var DATA = ${json(data)};
+var STYLE = ${json(buildStyle('dark'))};
+var HEAT = ${json(HEAT)};
+var fmt = function (v) { return v.toFixed(1).replace('.', ','); };
+var fc = function (features) { return { type: 'FeatureCollection', features: features }; };
+var el = function (tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+var map = new maplibregl.Map({ container: 'map', style: STYLE, center: [DATA.hub.lon, DATA.hub.lat], zoom: 12.6, dragRotate: false, attributionControl: { compact: true } });
 map.touchZoomRotate.disableRotation();
 
-const shifts = [...new Set(DATA.points.map((p) => p.shift))];
-let shift = null;      // null — все смены
-let selected = null;   // индекс выбранного адреса
+var tab = 'overview';
+var mode = 'heat';       // heat — популярность путей, routes — все маршруты
+var shift = null;        // фильтр по смене
+var selected = null;     // выбранный адрес
+var highlight = null;    // { kind: 'path'|'points', key, lines?, idx? }
 
-const visible = () => DATA.points.map((p, i) => ({ p, i })).filter(({ p }) => !shift || p.shift === shift);
-const routeFeatures = (list) => list.filter(({ p }) => p.line).map(({ p, i }) => ({ type: 'Feature', properties: { i }, geometry: { type: 'LineString', coordinates: p.line } }));
-const pointFeatures = (list) => list.map(({ p, i }) => ({ type: 'Feature', properties: { i, approx: p.approx }, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } }));
+function visible() {
+  return DATA.points.map(function (p, i) { return { p: p, i: i }; }).filter(function (x) { return !shift || x.p.shift === shift; });
+}
+function routeFeatures(list) {
+  return list.filter(function (x) { return x.p.line; }).map(function (x) { return { type: 'Feature', properties: { i: x.i }, geometry: { type: 'LineString', coordinates: x.p.line } }; });
+}
+function pointFeatures(list) {
+  return list.map(function (x) { return { type: 'Feature', properties: { i: x.i, approx: x.p.approx }, geometry: { type: 'Point', coordinates: [x.p.lon, x.p.lat] } }; });
+}
+function heatFeatures() {
+  return DATA.heat.map(function (h) { return { type: 'Feature', properties: { n: h.n }, geometry: { type: 'MultiLineString', coordinates: h.lines } }; });
+}
 
-function paint() {
-  const list = visible();
+function paintMap() {
+  var list = visible();
+  var showHeat = mode === 'heat' && !shift;
+  map.setLayoutProperty('heat', 'visibility', showHeat ? 'visible' : 'none');
+  map.setLayoutProperty('routes', 'visibility', showHeat ? 'none' : 'visible');
   map.getSource('routes').setData(fc(routeFeatures(list)));
   map.getSource('points').setData(fc(pointFeatures(list)));
-  const sel = selected != null && list.find(({ i }) => i === selected);
-  map.getSource('selected').setData(fc(sel ? routeFeatures([sel]) : []));
-  map.getSource('selected-point').setData(fc(sel ? pointFeatures([sel]) : []));
-  const withRoute = list.filter(({ p }) => p.line);
-  const km = withRoute.reduce((s, { p }) => s + p.length, 0) / 1000;
-  document.getElementById('n').textContent = list.length;
-  document.getElementById('km').textContent = fmt(km);
-  document.getElementById('avg').textContent = fmt(km / (withRoute.length || 1));
-  for (const b of document.querySelectorAll('#chips button')) b.classList.toggle('on', (b.dataset.shift || null) === shift);
-  const box = document.getElementById('sel');
-  box.hidden = !sel;
-  if (sel) {
-    const p = sel.p;
-    box.replaceChildren();
-    const title = document.createElement('b'); title.textContent = p.label; box.append(title);
-    const lines = [
-      [p.zip, p.line ? fmt(p.length / 1000) + ' км от хаба · ~' + Math.max(1, Math.round(p.time / 60)) + ' мин' : 'маршрут не построился'].filter(Boolean).join(' · '),
-      'добавлен ' + new Date(p.ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + (p.approx ? ' · точка примерная' : ''),
-      p.note,
-    ].filter(Boolean);
-    for (const t of lines) { const d = document.createElement('p'); d.textContent = t; box.append(d); }
+  var hlLines = [], hlPoints = [];
+  if (highlight && highlight.lines) hlLines = [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: highlight.lines } }];
+  if (highlight && highlight.idx) {
+    var sel = highlight.idx.map(function (i) { return { p: DATA.points[i], i: i }; });
+    hlLines = routeFeatures(sel);
+    hlPoints = pointFeatures(sel);
+  }
+  if (selected != null) {
+    var one = [{ p: DATA.points[selected], i: selected }];
+    hlLines = routeFeatures(one);
+    hlPoints = pointFeatures(one);
+  }
+  map.getSource('hl').setData(fc(hlLines));
+  map.getSource('hl-points').setData(fc(hlPoints));
+}
+
+function fitTo(coords) {
+  if (!coords.length) return;
+  var lons = coords.map(function (c) { return c[0]; }), lats = coords.map(function (c) { return c[1]; });
+  var small = innerWidth <= 600;
+  map.fitBounds([[Math.min.apply(null, lons), Math.min.apply(null, lats)], [Math.max.apply(null, lons), Math.max.apply(null, lats)]],
+    { padding: small ? { top: document.querySelector('.panel').offsetHeight + 30, bottom: 40, left: 30, right: 30 } : { top: 40, bottom: 40, left: 420, right: 40 }, maxZoom: 16, duration: 500 });
+}
+
+// Строка списка: название, полоска длины по значению, число. Нажатие — подсветка на карте.
+function rows(items, max, valueText, onPick, isOn) {
+  var box = el('div', 'rows');
+  items.forEach(function (it) {
+    var r = el('button', 'row' + (isOn(it) ? ' on' : ''));
+    r.append(el('span', 'name', it.label));
+    var v = el('span', 'val'); v.innerHTML = ''; v.append(valueText(it)); r.append(v);
+    var bar = el('i', 'bar'); bar.style.width = 'calc((100% - 16px) * ' + (it.count / max).toFixed(3) + ')'; r.append(bar);
+    r.title = it.label + ': ' + it.count;
+    r.onclick = function () { onPick(it); };
+    box.append(r);
+  });
+  return box;
+}
+function val(b, rest) { var f = document.createDocumentFragment(); f.append(el('b', null, String(b))); if (rest) f.append(' ' + rest); return f; }
+
+function columns(values, labels, unit) {
+  var wrap = el('div');
+  var max = Math.max.apply(null, values) || 1;
+  var cols = el('div', 'cols');
+  values.forEach(function (v, i) {
+    var c = el('div', 'col');
+    c.title = labels[i] + ': ' + v + ' ' + unit;
+    var bar = el('i', v ? '' : 'zero');
+    if (v) { bar.style.height = Math.max(3, (v / max) * 90) + 'px'; c.append(el('em', null, String(v))); }
+    c.append(bar);
+    cols.append(c);
+  });
+  var lab = el('div', 'labels');
+  labels.forEach(function (l) { lab.append(el('span', null, l)); });
+  wrap.append(cols, lab);
+  return wrap;
+}
+
+function pickPoints(kind, it) {
+  if (highlight && highlight.key === kind + it.label) { highlight = null; paintAll(); return; }
+  selected = null; shift = null;
+  highlight = { key: kind + it.label, idx: it.idx };
+  paintAll();
+  fitTo(it.idx.map(function (i) { return [DATA.points[i].lon, DATA.points[i].lat]; }).concat([[DATA.hub.lon, DATA.hub.lat]]));
+}
+
+var TABS = [
+  ['overview', 'Обзор'], ['paths', 'Пути'], ['streets', 'Куда'], ['districts', 'Районы'], ['time', 'Время'],
+];
+
+function renderBody() {
+  var body = document.getElementById('body');
+  body.replaceChildren();
+  var list = visible();
+  if (tab === 'overview') {
+    var withRoute = list.filter(function (x) { return x.p.line; });
+    var km = withRoute.reduce(function (s, x) { return s + x.p.length; }, 0) / 1000;
+    var shifts = shift ? 1 : DATA.summary.shifts;
+    var big = el('div', 'big');
+    [[list.length, 'заказов'], [shifts, shift ? 'смена' : 'смен'], [fmt(list.length / shifts), 'за смену'], [fmt(km / (withRoute.length || 1)), 'км до клиента']].forEach(function (b) {
+      var d = el('div'); d.append(el('b', null, String(b[0])), el('span', null, b[1])); big.append(d);
+    });
+    body.append(big);
+    var seg = el('div', 'seg2');
+    [['heat', 'Популярность путей'], ['routes', 'Все маршруты']].forEach(function (m) {
+      var b = el('button', mode === m[0] && !(shift && m[0] === 'heat') ? 'on' : '', m[1]);
+      b.onclick = function () { mode = m[0]; if (m[0] === 'heat') shift = null; paintAll(); };
+      seg.append(b);
+    });
+    body.append(seg);
+    var legend = el('div', 'legend');
+    if (mode === 'heat' && !shift) {
+      var ramp = el('span', 'ramp');
+      HEAT.forEach(function (c) { var i = el('i'); i.style.background = c; ramp.append(i); });
+      legend.append(el('span', null, 'реже'), ramp, el('span', null, 'чаще — ярче и толще'));
+    } else legend.append(el('span', null, 'маршруты от хаба, где накладываются — ярче'));
+    var hubDot = el('span'); var d1 = el('i', 'dot'); d1.style.background = '${C.cycle}'; hubDot.append(d1, 'хаб');
+    var addrDot = el('span'); var d2 = el('i', 'dot'); d2.style.background = '#fff'; addrDot.append(d2, 'адрес');
+    legend.append(hubDot, addrDot);
+    body.append(legend);
+    body.append(el('h2', null, 'Смена'));
+    var chips = el('div', 'chips');
+    [[null, 'Все']].concat(DATA.shifts.map(function (s) { return [s.shift, s.shift]; })).forEach(function (c) {
+      var b = el('button', shift === c[0] ? 'on' : '', c[1]);
+      b.onclick = function () { shift = c[0]; selected = null; highlight = null; if (shift) mode = 'routes'; paintAll(); };
+      chips.append(b);
+    });
+    body.append(chips);
+    body.append(el('p', null, 'Нажми на точку — покажу адрес и маршрут. Маршруты построены ' + DATA.made + ' от хаба (BRouter, «Без горок»); откуда ты ехал на самом деле, приложение не записывало. Файл личный: в нём адреса клиентов.'));
+  } else if (tab === 'paths') {
+    body.append(el('p', null, 'Улицы, по которым маршруты от хаба проходят чаще всего (засчитано, если по улице не меньше 80 м). Название — по ближайшим домам, на перекрёстках возможны неточности.'));
+    body.append(rows(DATA.paths, DATA.paths[0] ? DATA.paths[0].count : 1,
+      function (it) { return val(it.count, 'раз · ' + fmt(it.km) + ' км'); },
+      function (it) {
+        if (highlight && highlight.key === 'path' + it.label) { highlight = null; paintAll(); return; }
+        selected = null; shift = null; mode = 'heat';
+        highlight = { key: 'path' + it.label, lines: it.lines };
+        paintAll();
+        fitTo([].concat.apply([], it.lines));
+      },
+      function (it) { return highlight && highlight.key === 'path' + it.label; }));
+  } else if (tab === 'streets') {
+    body.append(el('p', null, 'Улицы, куда чаще всего привозил заказы. Нажми — покажу адреса и маршруты.'));
+    body.append(rows(DATA.streets, DATA.streets[0].count, function (it) { return val(it.count, 'заказов'); },
+      function (it) { pickPoints('street', it); }, function (it) { return highlight && highlight.key === 'street' + it.label; }));
+    if (DATA.repeats.length) {
+      body.append(el('h2', null, 'Один и тот же дом несколько раз'));
+      body.append(rows(DATA.repeats, DATA.repeats[0].count, function (it) { return val(it.count, 'раза'); },
+        function (it) { pickPoints('repeat', it); }, function (it) { return highlight && highlight.key === 'repeat' + it.label; }));
+      body.append(el('p', null, 'Сюда стоит записать код, этаж и вход — в следующий раз сэкономит время.'));
+    }
+  } else if (tab === 'districts') {
+    body.append(el('p', null, 'Заказы по почтовым индексам. Нажми — покажу адреса района.'));
+    var total = DATA.points.length;
+    body.append(rows(DATA.districts, DATA.districts[0].count, function (it) { return val(it.count, '· ' + Math.round(it.count / total * 100) + ' %'); },
+      function (it) { pickPoints('district', it); }, function (it) { return highlight && highlight.key === 'district' + it.label; }));
+  } else if (tab === 'time') {
+    // Часы по порядку смены: с 6 утра до 5 утра следующего дня, пустые края обрезаны.
+    var order = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5];
+    var a = 0, z = order.length - 1;
+    while (a < z && !DATA.hours[order[a]]) a++;
+    while (z > a && !DATA.hours[order[z]]) z--;
+    var hrs = [], hl = [];
+    for (var k = a; k <= z; k++) { hrs.push(DATA.hours[order[k]]); hl.push(String(order[k])); }
+    body.append(el('h2', null, 'Заказы по часам'), columns(hrs, hl, 'заказов'));
+    body.append(el('h2', null, 'По дням недели'), columns(DATA.weekdays, ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'], 'заказов'));
+    body.append(el('h2', null, 'Смены'));
+    var t = el('table'); var head = el('tr');
+    ['Дата', 'Время', 'Заказов', 'км*'].forEach(function (x) { head.append(el('th', null, x)); }); t.append(head);
+    DATA.shifts.forEach(function (s) {
+      var tr = el('tr'); [s.shift, s.time, s.count, fmt(s.km)].forEach(function (x) { tr.append(el('td', null, String(x))); }); t.append(tr);
+    });
+    body.append(t, el('p', null, '* километры от хаба до клиентов в одну сторону, по построенным маршрутам; дорога обратно не учтена.'));
   }
 }
 
-map.on('load', () => {
-  const empty = fc([]);
-  for (const id of ['routes', 'selected', 'points', 'selected-point']) map.addSource(id, { type: 'geojson', data: empty });
+function renderTabs() {
+  var box = document.getElementById('tabs');
+  box.replaceChildren();
+  TABS.forEach(function (t) {
+    var b = el('button', tab === t[0] ? 'on' : '', t[1]);
+    b.onclick = function () { tab = t[0]; renderTabs(); renderBody(); document.getElementById('body').scrollTop = 0; };
+    box.append(b);
+  });
+}
+
+function renderSel(info) {
+  var box = document.getElementById('sel');
+  box.replaceChildren();
+  if (info) { box.hidden = false; box.append(info); return; }
+  box.hidden = selected == null;
+  if (selected == null) return;
+  var p = DATA.points[selected];
+  box.append(el('b', null, p.label));
+  [[p.zip, p.line ? fmt(p.length / 1000) + ' км от хаба · ~' + Math.max(1, Math.round(p.time / 60)) + ' мин' : 'маршрут не построился'].filter(Boolean).join(' · '),
+    'заказ ' + new Date(p.ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + (p.approx ? ' · точка примерная' : ''),
+    p.note].filter(Boolean).forEach(function (t) { box.append(el('p', null, t)); });
+}
+
+function paintAll() { renderTabs(); renderBody(); paintMap(); renderSel(); }
+
+map.on('load', function () {
+  ['routes', 'points', 'hl', 'hl-points', 'heat'].forEach(function (id) { map.addSource(id, { type: 'geojson', data: fc([]) }); });
+  map.getSource('heat').setData(fc(heatFeatures()));
   map.addSource('hub', { type: 'geojson', data: fc([{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [DATA.hub.lon, DATA.hub.lat] } }]) });
-  // Полупрозрачные линии: где маршруты накладываются, улица светится ярче — видно, где ездишь чаще всего.
+  // Популярность: число маршрутов на отрезке → цвет (одна шкала синего) и толщина.
+  map.addLayer({ id: 'heat', type: 'line', source: 'heat', layout: { 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'n'] },
+    paint: { 'line-color': ['step', ['get', 'n'], HEAT[0], 2, HEAT[1], 5, HEAT[2], 12, HEAT[3], 30, HEAT[4]],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, ['interpolate', ['linear'], ['get', 'n'], 1, 1.2, 40, 5], 16, ['interpolate', ['linear'], ['get', 'n'], 1, 3, 40, 12]] } }, 'street-name');
   map.addLayer({ id: 'routes', type: 'line', source: 'routes', layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '${C.route}', 'line-opacity': 0.28, 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2, 16, 5] } }, 'street-name');
-  map.addLayer({ id: 'selected-casing', type: 'line', source: 'selected', layout: { 'line-cap': 'round', 'line-join': 'round' },
+  map.addLayer({ id: 'hl-casing', type: 'line', source: 'hl', layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#04141d', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 7, 16, 12] } }, 'street-name');
-  map.addLayer({ id: 'selected', type: 'line', source: 'selected', layout: { 'line-cap': 'round', 'line-join': 'round' },
+  map.addLayer({ id: 'hl', type: 'line', source: 'hl', layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '${C.approx}', 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 4, 16, 7] } }, 'street-name');
   map.addLayer({ id: 'points', type: 'circle', source: 'points',
-    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 4, 16, 8], 'circle-color': '#ffffff', 'circle-stroke-color': '#04141d', 'circle-stroke-width': 2 } });
-  map.addLayer({ id: 'selected-point', type: 'circle', source: 'selected-point',
-    paint: { 'circle-radius': 11, 'circle-color': '${C.approx}', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 3 } });
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 3.5, 16, 8], 'circle-color': '#ffffff', 'circle-stroke-color': '#04141d', 'circle-stroke-width': 2 } });
+  map.addLayer({ id: 'hl-points', type: 'circle', source: 'hl-points',
+    paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 6, 16, 10], 'circle-color': '${C.approx}', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
   map.addLayer({ id: 'hub', type: 'circle', source: 'hub', paint: { 'circle-radius': 10, 'circle-color': '${C.cycle}', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 3 } });
 
-  const chips = document.getElementById('chips');
-  const add = (label, value) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    if (value) b.dataset.shift = value;
-    b.onclick = () => { shift = value; selected = null; paint(); };
-    chips.append(b);
-  };
-  add('Все', null);
-  for (const s of shifts) add(s, s);
+  map.on('click', function (e) {
+    var hit = map.queryRenderedFeatures([[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]], { layers: ['hl-points', 'points'] });
+    if (hit.length) { selected = hit[0].properties.i; paintMap(); renderSel(); return; }
+    var seg = map.getLayoutProperty('heat', 'visibility') !== 'none' && map.queryRenderedFeatures([[e.point.x - 5, e.point.y - 5], [e.point.x + 5, e.point.y + 5]], { layers: ['heat'] });
+    if (seg && seg.length) {
+      var n = Math.max.apply(null, seg.map(function (f) { return f.properties.n; }));
+      selected = null; paintMap();
+      var b = el('div'); b.append(el('b', null, 'Здесь проходит ' + n + ' ' + (n % 10 === 1 && n % 100 !== 11 ? 'маршрут' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'маршрута' : 'маршрутов'))), el('p', null, 'из ' + DATA.summary.routes + ' построенных от хаба'));
+      renderSel(b);
+      return;
+    }
+    selected = null; paintMap(); renderSel();
+  });
+  map.on('mouseenter', 'points', function () { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'points', function () { map.getCanvas().style.cursor = ''; });
 
-  map.on('click', 'points', (e) => { selected = e.features[0].properties.i; paint(); });
-  map.on('click', (e) => { if (!map.queryRenderedFeatures(e.point, { layers: ['points'] }).length) { selected = null; paint(); } });
-  map.on('mouseenter', 'points', () => { map.getCanvas().style.cursor = 'pointer'; });
-  map.on('mouseleave', 'points', () => { map.getCanvas().style.cursor = ''; });
-
-  const lons = DATA.points.map((p) => p.lon).concat(DATA.hub.lon);
-  const lats = DATA.points.map((p) => p.lat).concat(DATA.hub.lat);
-  map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: innerWidth > 800 ? { top: 40, bottom: 40, left: 400, right: 40 } : { top: document.querySelector('.panel').offsetHeight + 30, bottom: 50, left: 30, right: 30 }, duration: 0 });
-  document.getElementById('foot').textContent = 'Нажми на точку — покажу адрес и маршрут к нему. Кнопки с датами показывают одну смену. Маршруты построены ' + DATA.made + ' от хаба (BRouter, «Без горок»); откуда ты ехал на самом деле, приложение не записывало. Файл личный: в нём адреса клиентов.';
-  paint();
+  fitTo(DATA.points.map(function (p) { return [p.lon, p.lat]; }).concat([[DATA.hub.lon, DATA.hub.lat]]));
+  paintAll();
+  // Подпись авторов карты по умолчанию раскрыта и закрывает низ экрана — сворачиваем в значок «i».
+  var attrib = document.querySelector('.maplibregl-ctrl-attrib');
+  if (attrib) attrib.classList.remove('maplibregl-compact-show');
 });
 </script>
 </body>
@@ -258,4 +580,5 @@ map.on('load', () => {
 const out = new URL('../private/karta-adresov.html', import.meta.url);
 writeFileSync(out, html);
 console.log(`адресов: ${points.length}, маршрутов: ${withRoute.length}, всего ${totalKm.toFixed(1)} км в одну сторону`);
+console.log(`отрезков: ${segs.size}, самый частый — ${Math.max(...[...segs.values()].map((s) => s.n))} маршрутов; популярные улицы: ${paths.slice(0, 5).map((p) => `${p.label} ${p.count}`).join(', ')}`);
 console.log('готово:', decodeURIComponent(out.pathname.replace(/^\//, '')));
