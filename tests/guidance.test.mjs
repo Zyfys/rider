@@ -135,3 +135,21 @@ test('progress along the route grows from 0 to total', () => {
   }
   assert.ok(Math.abs(last - g.total) < 1);
 });
+
+test('arriving from another side (off the route line) still counts as arrival', () => {
+  const g = buildGuide(coords, hints);
+  step(g, coords[0]);
+  const end = coords[coords.length - 1];
+  const side = [end[0], end[1] + 0.0002]; // ~22 м к северу от конца, последний отрезок идёт на запад
+  const r = step(g, side);
+  assert.deepEqual(r.say, ['Вы на месте']);
+  assert.equal(g.arrived, true);
+});
+
+test('passing close to the destination early on the route is not an arrival', () => {
+  const g = buildGuide(coords, hints);
+  // Точка на маршруте, далеко от конца: приезда нет, даже если рядом окажется конец другого маршрута.
+  const mid = coords[Math.floor(coords.length / 2)];
+  assert.ok(!step(g, mid).say.includes('Вы на месте'));
+  assert.equal(g.arrived, false);
+});

@@ -118,12 +118,21 @@ const PRE_DISTANCE = 100;
 const CLIMB_DISTANCE = 120;
 export const CLIMB_PHRASE = 'Впереди крутой подъём. Помощь на максимум.';
 
+// Ближе этого (по прямой) к концу маршрута — уже на месте.
+const ARRIVE_NEAR = 30;
+
 // Один шаг по новой GPS-точке (speed — м/с, может быть null).
 // Возвращает { say: [фразы], offRoute, next, s — пройдено метров по маршруту }.
 export function step(g, p, speed = null) {
   // Уже на месте — дальше молчим и не перестраиваем, даже если отошли от точки.
   if (g.arrived) return { say: [], offRoute: false, next: upcoming(g), s: g.total };
   const { s, off } = locate(g, p);
+  // Уже у конца маршрута, но не на его линии (подъехал к хабу с другой стороны) —
+  // иначе приезд не отмечался: в журнале он был только у 8 поездок в хаб из 53.
+  if (distance(p, g.coords[g.coords.length - 1]) < ARRIVE_NEAR && off > 15) {
+    g.arrived = true;
+    return { say: ['Вы на месте'], offRoute: false, next: upcoming(g), s: g.total };
+  }
   // Далеко от линии — ничего не объявляем (иначе GPS-скачок дал бы ложное «Вы на месте»).
   // Две такие точки подряд — сход с маршрута.
   g.offCount = off > 45 ? g.offCount + 1 : 0;

@@ -8,7 +8,7 @@ import { arrowSvg } from './arrows.js';
 import { computeStats } from './stats.js';
 import { worstClimb } from './elevation.js';
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 
 // ---------- Мелкие помощники ----------
 
@@ -336,14 +336,14 @@ async function migrate() {
   await backfillTrips();
 }
 
-// Журнал поездок появился в версии 1.9. Для адресов, сохранённых раньше, восстанавливаем по одной
-// поездке на адрес: время — когда адрес был добавлен, расстояние — оценка (по прямой от хаба × 1,35).
+// Адрес добавлен, а маршрут к нему в приложении не строили (адреса до версии 1.9 или поездка без карты) —
+// через 3 часа записываем одну поездку с оценкой: время — когда адрес добавлен, расстояние — по прямой
+// от хаба × 1,35. Иначе статистика не видела большую часть доставок.
+const BACKFILL_AFTER = 3 * 3600 * 1000;
 async function backfillTrips() {
-  let since = store.get('tripsSince', null);
-  if (!since) { since = Date.now(); store.set('tripsSince', since); }
   const known = new Set(state.trips.map((t) => t.target));
   const added = state.addresses
-    .filter((a) => a.createdAt && a.createdAt < since && !known.has(a.id))
+    .filter((a) => a.createdAt && a.createdAt < Date.now() - BACKFILL_AFTER && !known.has(a.id))
     .map((a) => ({
       id: `bf-${a.id}`, ts: a.createdAt, target: a.id, kind: 'address',
       street: a.street, house: a.house, zip: a.zip,
@@ -1049,7 +1049,7 @@ function openStats() {
         h('span', { class: 'stat-km' }, `${fmtKmNum((t.length || 0) / 1000)} км`)))),
       h('p', { class: 'hint' }, 'Километры — по построенному маршруту, вместе с возвращениями в хаб. Журнал хранится только на этом телефоне.'),
       state.trips.some((t) => t.estimated)
-        ? h('p', { class: 'hint' }, 'Поездки до версии 1.9 восстановлены по сохранённым адресам: одна на адрес, расстояние — оценка от хаба, без обратной дороги.')
+        ? h('p', { class: 'hint' }, 'Адреса, к которым маршрут в приложении не строился, учтены по одной поездке: расстояние — оценка от хаба, без обратной дороги.')
         : null);
   openSheet('Статистика', body);
 }

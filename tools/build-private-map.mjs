@@ -1,22 +1,29 @@
 // Личная карта: все сохранённые адреса и маршруты к ним от хаба.
 //
-//   node tools/build-private-map.mjs "путь/к/flink-helper-backup-ГГГГ-ММ-ДД.json" [lat,lon хаба]
+//   node tools/build-private-map.mjs копия1.json [копия2.json …] [lat,lon хаба]
+//
+// Можно передать несколько резервных копий — адреса объединяются (одинаковые id считаются один раз).
 //
 // Результат — один файл private/karta-adresov.html (папка private/ не попадает в git:
 // внутри адреса клиентов). Открывается в браузере, работает и на телефоне.
 // Маршруты строятся заново через BRouter от хаба — как их строит приложение
-// («Быстрый» профиль с правкой из profiles/flink-fastbike.brf).
+// (профиль по умолчанию «Без горок», profiles/flink-easy.brf).
 // Откуда на самом деле начиналась каждая поездка, приложение не записывало.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { buildStyle, THEMES } from '../js/map-style.js';
 import { buildIndex, lookup, HUB } from '../js/geocode.js';
 import { parseAddress, isNoise } from '../js/address.js';
 
-const [backupPath, hubArg] = process.argv.slice(2);
-if (!backupPath) { console.error('Укажи путь к файлу резервной копии'); process.exit(1); }
+const args = process.argv.slice(2);
+const hubArg = args.find((a) => /^\d+\.\d+,\d+\.\d+$/.test(a));
+const backupPaths = args.filter((a) => a !== hubArg);
+if (!backupPaths.length) { console.error('Укажи путь к файлу резервной копии'); process.exit(1); }
 const hub = hubArg ? { lat: +hubArg.split(',')[0], lon: +hubArg.split(',')[1] } : HUB;
 
-const backup = JSON.parse(readFileSync(backupPath, 'utf8').replace(/^﻿/, ''));
+const seen = new Set();
+const backup = { addresses: backupPaths
+  .flatMap((f) => JSON.parse(readFileSync(f, 'utf8').replace(/^\uFEFF/, '')).addresses)
+  .filter((a) => !seen.has(a.id) && seen.add(a.id)) };
 const index = buildIndex(JSON.parse(readFileSync(new URL('../data/addresses-dresden.json', import.meta.url))));
 
 // Адреса: координаты из копии, а где их нет — ищем заново (с теми же исправлениями, что в приложении).
@@ -24,9 +31,12 @@ const points = [];
 for (const a of backup.addresses) {
   let { street, house, lat, lon } = a;
   let approx = !!a.geoApprox;
-  if (!lat) {
+  // Старые версии могли неверно разобрать адрес (квартира в названии улицы) — разбираем заново.
+  if (!lat || /\d/.test(street)) {
     const p = parseAddress(`${street} ${house}`);
     if (p.street && p.house) ({ street, house } = p);
+  }
+  if (!lat) {
     const r = lookup(index, { street, house, zip: a.zip });
     if (!r) { console.warn('не найден на карте:', street, house); continue; }
     ({ lat, lon } = r);
@@ -50,10 +60,11 @@ const cache = existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, 'utf8')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let built = 0;
 
-// Тот же профиль, что использует приложение: стандартный «Быстрый» с правкой про use_sidepath.
+// Тот же профиль, что использует приложение по умолчанию: «Без горок» со всеми правками.
 // Сервер хранит загруженный профиль недолго, поэтому загружаем его при каждом запуске.
-const PROFILE_TAG = 'flink-fastbike-1';
-const profileText = readFileSync(new URL('../profiles/flink-fastbike.brf', import.meta.url), 'utf8');
+// При изменении profiles/flink-easy.brf увеличить число в PROFILE_TAG — иначе возьмутся старые маршруты из кэша.
+const PROFILE_TAG = 'flink-easy-2';
+const profileText = readFileSync(new URL('../profiles/flink-easy.brf', import.meta.url), 'utf8');
 async function uploadProfile() {
   const res = await fetch('https://brouter.de/brouter/profile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: profileText });
   if (!res.ok) throw new Error(`не удалось загрузить профиль: ${res.status}`);
@@ -236,7 +247,7 @@ map.on('load', () => {
   const lons = DATA.points.map((p) => p.lon).concat(DATA.hub.lon);
   const lats = DATA.points.map((p) => p.lat).concat(DATA.hub.lat);
   map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: innerWidth > 800 ? { top: 40, bottom: 40, left: 400, right: 40 } : { top: document.querySelector('.panel').offsetHeight + 30, bottom: 50, left: 30, right: 30 }, duration: 0 });
-  document.getElementById('foot').textContent = 'Нажми на точку — покажу адрес и маршрут к нему. Кнопки с датами показывают одну смену. Маршруты построены ' + DATA.made + ' от хаба (BRouter, «Быстрый»); откуда ты ехал на самом деле, приложение не записывало. Файл личный: в нём адреса клиентов.';
+  document.getElementById('foot').textContent = 'Нажми на точку — покажу адрес и маршрут к нему. Кнопки с датами показывают одну смену. Маршруты построены ' + DATA.made + ' от хаба (BRouter, «Без горок»); откуда ты ехал на самом деле, приложение не записывало. Файл личный: в нём адреса клиентов.';
   paint();
 });
 </script>
